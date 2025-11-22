@@ -12,7 +12,7 @@
 // -s  Процесс становится лидером группы. Подсказка: смотри setpgid(2).
 // -p  Печатает идентификаторы процесса, процесса-родителя и группы процессов.
 // -u  Печатает значение ulimit
-// -Unew_ulimit  Изменяет значение ulimit. Подсказка: смотри atol(3C) на странице руководства strtol(3C)
+// -Unew_ulimit  Изменяет значение ulimit. (невозможно)
 // -c  Печатает размер в байтах core-файла, который может быть создан.
 // -Csize  Изменяет размер core-файла
 // -d  Печатает текущую рабочую директорию
@@ -55,15 +55,6 @@ void print_process_ids(){
 void print_ulimit(){
     printf("\n");
     printf("ulimit: %ld\n", sysconf(_SC_CHILD_MAX));
-}
-
-void change_ulimit(const char *value){
-    printf("\n");
-    if (ulimit(0, atol(value)) == -1){
-        perror("ulimit");
-        return;
-    }
-    printf("ulimit changed to %ld\n", ulimit(0));
 }
 
 void print_core_size(){
@@ -163,9 +154,6 @@ int main(int argc, char *argv[]) {
                 break;
             case 'u':
                 print_ulimit();
-                break;
-            case 'U':
-                change_ulimit(optarg);
                 break;
             case 'c':
                 print_core_size();
