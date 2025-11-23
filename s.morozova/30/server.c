@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <ctype.h>
+#include <errno.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define BUFFER_SIZE 1024
@@ -47,39 +48,42 @@ int main() {
     
     printf("Сервер запущен и ожидает подключения...\n");
     
-    // Принимаем подключение
-    client_len = sizeof(client_addr);
-    client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd == -1) {
-        perror("accept");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    
-    printf("Клиент подключен!\n");
-    
-    // Читаем данные от клиента и преобразуем в верхний регистр
-    while ((bytes_read = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
-        buffer[bytes_read] = '\0';
-        
-        // Преобразуем каждый символ в верхний регистр
-        for (int i = 0; i < bytes_read; i++) {
-            buffer[i] = toupper(buffer[i]);
+    while (1) {
+        // Принимаем подключение
+        client_len = sizeof(client_addr);
+        client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd == -1) {
+            perror("accept");
+            continue; // Продолжаем ожидать подключения даже при ошибке
         }
         
-        // Выводим результат
-        printf("Преобразованный текст: %s", buffer);
-        fflush(stdout);
+        printf("Клиент подключен!\n");
+        
+        // Читаем данные от клиента и преобразуем в верхний регистр
+        while ((bytes_read = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
+            buffer[bytes_read] = '\0';
+            
+            // Преобразуем каждый символ в верхний регистр
+            for (int i = 0; i < bytes_read; i++) {
+                buffer[i] = toupper(buffer[i]);
+            }
+            
+            // Выводим результат
+            printf("Преобразованный текст: %s", buffer);
+            fflush(stdout);
+        }
+        
+        if (bytes_read == -1) {
+            perror("read");
+        }
+        
+        printf("Соединение разорвано. Ожидаем новое подключение...\n");
+        
+        // Закрываем клиентский сокет
+        close(client_fd);
     }
     
-    if (bytes_read == -1) {
-        perror("read");
-    }
-    
-    printf("\nСоединение разорвано. Сервер завершает работу.\n");
-    
-    // Закрываем сокеты и удаляем файл сокета
-    close(client_fd);
+    // Закрываем серверный сокет и удаляем файл сокета (этот код никогда не выполнится в текущей реализации)
     close(server_fd);
     unlink(SOCKET_PATH);
     

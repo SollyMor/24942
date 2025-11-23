@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <errno.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define BUFFER_SIZE 1024
@@ -27,7 +28,11 @@ int main() {
     
     // Подключаемся к серверу
     if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        perror("connect");
+        if (errno == ECONNREFUSED) {
+            printf("Сервер занят. Попробуйте позже.\n");
+        } else {
+            perror("connect");
+        }
         close(client_fd);
         exit(EXIT_FAILURE);
     }
