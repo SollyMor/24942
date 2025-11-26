@@ -53,7 +53,13 @@ void handle_client_data(int client_fd) {
     ssize_t bytes_read = read(client_fd, client->read_buffer, BUFFER_SIZE - 1);
     
     if (bytes_read > 0) {
-        printf("[Клиент %d]: ", client->client_id);
+        // Преобразуем в верхний регистр и выводим - ЭТО ГЛАВНАЯ ЦЕЛЬ!
+        printf("[Клиент %d исходный]: ", client->client_id);
+        for (int i = 0; i < bytes_read; i++) {
+            putchar(client->read_buffer[i]);
+        }
+        
+        printf("[Клиент %d результат]: ", client->client_id);
         for (int i = 0; i < bytes_read; i++) {
             putchar(toupper(client->read_buffer[i]));
         }
@@ -181,7 +187,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
-    printf("Сервер запущен\n");
+    printf("Сервер запущен. Ожидание подключений...\n");
     
     while (1) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
