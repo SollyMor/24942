@@ -7,6 +7,8 @@
 #include <poll.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define MAX_CLIENTS 10
@@ -15,7 +17,20 @@
 typedef struct {
     int fd;
     char buffer[BUFFER_SIZE];
+    int message_count;
 } client_t;
+
+void print_current_time() {
+    struct timeval tv;
+    struct tm *tm_info;
+    char time_buffer[26];
+    
+    gettimeofday(&tv, NULL);
+    tm_info = localtime(&tv.tv_sec);
+    
+    strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("[%s.%03ld] ", time_buffer, tv.tv_usec / 1000);
+}
 
 int main() {
     int server_fd, new_client_fd;
@@ -23,12 +38,13 @@ int main() {
     socklen_t client_len;
     struct pollfd fds[MAX_CLIENTS + 1];
     client_t clients[MAX_CLIENTS];
-    int nfds = 1; // начальное количество дескрипторов (сервер + клиенты)
+    int nfds = 1;
     int i, rc;
     
     // Инициализация массива клиентов
     for (i = 0; i < MAX_CLIENTS; i++) {
         clients[i].fd = -1;
+        clients[i].message_count = 0;
     }
     
     // Создаем сокет
@@ -68,7 +84,6 @@ int main() {
     fds[0].revents = 0;
     
     while (1) {
-        // Ждем события на одном из дескрипторов
         rc = poll(fds, nfds, -1);
         if (rc == -1) {
             perror("poll");
@@ -84,7 +99,6 @@ int main() {
                 continue;
             }
             
-            // Ищем свободный слот для нового клиента
             int client_index = -1;
             for (i = 0; i < MAX_CLIENTS; i++) {
                 if (clients[i].fd == -1) {
@@ -95,20 +109,23 @@ int main() {
             
             if (client_index != -1) {
                 clients[client_index].fd = new_client_fd;
+                clients[client_index].message_count = 0;
                 
-                // Добавляем клиента в массив poll
                 if (nfds < MAX_CLIENTS + 1) {
                     fds[nfds].fd = new_client_fd;
                     fds[nfds].events = POLLIN;
                     fds[nfds].revents = 0;
                     nfds++;
+                    print_current_time();
                     printf("Client %d connected (total clients: %d)\n", 
                            client_index, nfds - 1);
                 } else {
+                    print_current_time();
                     printf("Too many clients, rejecting connection\n");
                     close(new_client_fd);
                 }
             } else {
+                print_current_time();
                 printf("No free slots for new client\n");
                 close(new_client_fd);
             }
@@ -123,28 +140,73 @@ int main() {
                 if (bytes_read > 0) {
                     temp_buffer[bytes_read] = '\0';
                     
-                    // Преобразуем в верхний регистр и выводим
-                    for (int j = 0; j < bytes_read; j++) {
-                        temp_buffer[j] = toupper(temp_buffer[j]);
-                    }
-                    
-                    printf("[Client %d]: %s", i, temp_buffer);
-                    fflush(stdout);
-                    
-                } else if (bytes_read == 0) {
-                    // Клиент отключился
-                    printf("Client %d disconnected\n", i);
-                    close(fds[i].fd);
-                    
-                    // Удаляем клиента из массива
+                    // Находим индекс клиента в массиве
+                    int client_index = -1;
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].fd == fds[i].fd) {
-                            clients[j].fd = -1;
+                            client_index = j;
+                            clients[j].message_count++;
                             break;
                         }
                     }
                     
-                    // Удаляем дескриптор из массива poll
+                    // Сохраняем оригинальный текст для вывода
+                    char original[BUFFER_SIZE];
+                    strncpy(original, temp_buffer, BUFFER_SIZE);
+                    original[strlen(original) - 1] = '\0'; // убираем \n для красивого вывода
+                    
+                    // Преобразуем в верхний регистр
+                    for (int j = 0; j < bytes_read; j++) {
+                        temp_buffer[j] = toupper(temp_buffer[j]);
+                    }
+                    
+                    // Выводим на сервере с временем и номером сообщения
+                    print_current_time();
+                    if (client_index != -1) {
+                        printf("Client %d, Message #%d: '%s' -> '%s'", 
+                               client_index, 
+                               clients[client_index].message_count,
+                               original, 
+                               temp_buffer);
+                    } else {
+                        printf("Unknown client, Message: '%s' -> '%s'", 
+                               original, 
+                               temp_buffer);
+                    }
+                    
+                    // Отправляем преобразованный текст обратно клиенту
+                    if (write(fds[i].fd, temp_buffer, bytes_read) == -1) {
+                        perror("write back to client");
+                    }
+                    
+                } else if (bytes_read == 0) {
+                    // Находим индекс клиента для вывода информации
+                    int client_index = -1;
+                    for (int j = 0; j < MAX_CLIENTS; j++) {
+                        if (clients[j].fd == fds[i].fd) {
+                            client_index = j;
+                            break;
+                        }
+                    }
+                    
+                    print_current_time();
+                    if (client_index != -1) {
+                        printf("Client %d disconnected (sent %d messages)\n", 
+                               client_index, clients[client_index].message_count);
+                    } else {
+                        printf("Unknown client disconnected\n");
+                    }
+                    
+                    close(fds[i].fd);
+                    
+                    for (int j = 0; j < MAX_CLIENTS; j++) {
+                        if (clients[j].fd == fds[i].fd) {
+                            clients[j].fd = -1;
+                            clients[j].message_count = 0;
+                            break;
+                        }
+                    }
+                    
                     fds[i].fd = -1;
                 } else {
                     perror("read");
@@ -155,7 +217,6 @@ int main() {
         // Убираем закрытые дескрипторы из массива poll
         for (i = 1; i < nfds; i++) {
             if (fds[i].fd == -1) {
-                // Сдвигаем массив
                 for (int j = i; j < nfds - 1; j++) {
                     fds[j] = fds[j + 1];
                 }
@@ -165,7 +226,7 @@ int main() {
         }
     }
     
-    // Закрываем все соединения и убираем сокет файл
+    // Очистка
     for (i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd != -1) {
             close(clients[i].fd);
