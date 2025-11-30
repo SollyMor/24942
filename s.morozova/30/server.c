@@ -6,9 +6,16 @@
 #include <sys/un.h>
 #include <time.h>
 #include <ctype.h>
+#include <signal.h>
 
 #define SOCKET_PATH "/tmp/uppercase_socket"
 #define BUFFER_SIZE 1024
+
+volatile sig_atomic_t keep_running = 1;
+
+void signal_handler(int sig) {
+    keep_running = 0;
+}
 
 int main() {
     int server_fd, client_fd;
@@ -18,9 +25,14 @@ int main() {
     ssize_t bytes_read;
     time_t start_time, end_time;
     
+    // Регистрируем обработчик сигналов для graceful shutdown
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
     // Засекаем время начала работы сервера
     time(&start_time);
     printf("Сервер запущен в: %s", ctime(&start_time));
+    printf("Для остановки сервера нажмите Ctrl+C\n");
     
     // Создаем сокет
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -53,37 +65,48 @@ int main() {
     
     printf("Сервер слушает на сокете: %s\n", SOCKET_PATH);
     
-    // Принимаем соединение от клиента
-    client_len = sizeof(client_addr);
-    client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd == -1) {
-        perror("accept");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    
-    printf("Клиент подключен\n");
-    
-    // Читаем данные от клиента и преобразуем в верхний регистр
-    while ((bytes_read = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
-        buffer[bytes_read] = '\0';
+    // Главный цикл сервера
+    while (keep_running) {
+        printf("Ожидание подключения клиента...\n");
         
-        // Преобразуем каждый символ в верхний регистр
-        for (int i = 0; i < bytes_read; i++) {
-            buffer[i] = toupper(buffer[i]);
+        // Принимаем соединение от клиента
+        client_len = sizeof(client_addr);
+        client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client_fd == -1) {
+            if (keep_running) {
+                perror("accept");
+            }
+            continue;
         }
         
-        // Выводим преобразованный текст
-        printf("СЕРВЕР: %s", buffer);
-        fflush(stdout);
+        printf("Клиент подключен\n");
+        
+        // Читаем данные от клиента и преобразуем в верхний регистр
+        while ((bytes_read = read(client_fd, buffer, BUFFER_SIZE - 1)) > 0) {
+            buffer[bytes_read] = '\0';
+            
+            // Преобразуем каждый символ в верхний регистр
+            for (int i = 0; i < bytes_read; i++) {
+                buffer[i] = toupper(buffer[i]);
+            }
+            
+            // Выводим преобразованный текст
+            printf("СЕРВЕР: %s", buffer);
+            fflush(stdout);
+        }
+        
+        if (bytes_read == -1) {
+            perror("read");
+        }
+        
+        printf("Клиент отключен\n");
+        close(client_fd);
     }
     
-    if (bytes_read == -1) {
-        perror("read");
-    }
+    // Завершаем работу сервера
+    printf("\nЗавершение работы сервера...\n");
     
-    // Закрываем соединения
-    close(client_fd);
+    // Закрываем сокет
     close(server_fd);
     
     // Удаляем файл сокета
@@ -91,7 +114,7 @@ int main() {
     
     // Засекаем время окончания и выводим общее время работы
     time(&end_time);
-    printf("\nСервер завершил работу в: %s", ctime(&end_time));
+    printf("Сервер завершил работу в: %s", ctime(&end_time));
     printf("Общее время работы сервера: %.2f секунд\n", difftime(end_time, start_time));
     
     return 0;
