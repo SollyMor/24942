@@ -4,44 +4,69 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <signal.h>
 
-#define SOCKET_PATH "/tmp/async_socket"
+#define SOCKET_PATH "/tmp/case_converter_socket"
 #define BUFFER_SIZE 1024
+#define DELAY_SECONDS 1
 
-int main() {
-    int sockfd;
-    struct sockaddr_un addr;
+int client_fd = -1;
+
+void cleanup(int sig) {
+    if (client_fd != -1) {
+        close(client_fd);
+    }
+    exit(0);
+}
+
+int main(int argc, char *argv[]) {
+    struct sockaddr_un server_addr;
     char buffer[BUFFER_SIZE];
     
-    // Создаем сокет
-    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sockfd == -1) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <text>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    
+    strncpy(buffer, argv[1], BUFFER_SIZE - 1);
+    buffer[BUFFER_SIZE - 1] = '\0';
+    
+    if (buffer[strlen(buffer) - 1] != '\n') {
+        strncat(buffer, "\n", BUFFER_SIZE - strlen(buffer) - 1);
+    }
+    
+    signal(SIGINT, cleanup);
+    signal(SIGTERM, cleanup);
+    
+    client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client_fd == -1) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
     
-    // Настраиваем адрес сервера
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    // Подключаемся к серверу
-    if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
-        close(sockfd);
+        close(client_fd);
         exit(EXIT_FAILURE);
     }
     
-    printf("Подключен к серверу\n");
+    printf("Connected to server. Sending text: %s", buffer);
+    printf("Will resend every %d second. Press Ctrl+C to stop.\n", DELAY_SECONDS);
     
-    // Отправляем несколько сообщений
-    for (int i = 1; i <= 3; i++) {
-        snprintf(buffer, BUFFER_SIZE, "Сообщение %d от клиента\n", i);
-        write(sockfd, buffer, strlen(buffer));
-        printf("Отправлено: %s", buffer);
-        sleep(1);
+    while (1) {
+        if (write(client_fd, buffer, strlen(buffer)) == -1) {
+            perror("write");
+            break;
+        }
+        sleep(DELAY_SECONDS);
     }
     
-    close(sockfd);
+    printf("Disconnecting from server\n");
+    close(client_fd);
+    
     return 0;
 }

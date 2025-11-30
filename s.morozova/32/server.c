@@ -4,9 +4,14 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <poll.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
+#include <sys/time.h>
+#include <aio.h>
+#include <signal.h>
+#include <pthread.h>
+#include <asm-generic/siginfo.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define MAX_CLIENTS 10
@@ -14,20 +19,106 @@
 
 typedef struct {
     int fd;
+    int client_id;
+    int active;
+    struct aiocb aio_cb;
     char buffer[BUFFER_SIZE];
+    char output_buffer[BUFFER_SIZE];
 } client_t;
+
+client_t clients[MAX_CLIENTS];
+int next_client_id = 0;
+pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void print_current_time() {
+    struct timeval tv;
+    struct tm *tm_info;
+    char time_buffer[26];
+    
+    gettimeofday(&tv, NULL);
+    tm_info = localtime(&tv.tv_sec);
+    
+    strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    printf("[%s.%03ld] ", time_buffer, tv.tv_usec / 1000);
+}
+
+void aio_completion_handler(sigval_t sigval) {
+    struct aiocb *aio_cb = (struct aiocb *)sigval.sival_ptr;
+    client_t *client = (client_t *)aio_cb->aio_sigevent.sigev_value.sival_ptr;
+    
+    int bytes_read = aio_return(aio_cb);
+    
+    if (bytes_read > 0) {
+        client->buffer[bytes_read] = '\0';
+        
+        // Преобразуем в верхний регистр
+        for (int i = 0; i < bytes_read; i++) {
+            client->output_buffer[i] = toupper(client->buffer[i]);
+        }
+        client->output_buffer[bytes_read] = '\0';
+        
+        // Блокируем вывод для атомарной записи
+        pthread_mutex_lock(&output_mutex);
+        
+        print_current_time();
+        printf("клиент %d: %s", client->client_id, client->output_buffer);
+        fflush(stdout);
+        
+        pthread_mutex_unlock(&output_mutex);
+        
+        // Отправляем ответ обратно клиенту
+        write(client->fd, client->output_buffer, bytes_read);
+        
+        // Запускаем следующее асинхронное чтение
+        memset(&client->aio_cb, 0, sizeof(struct aiocb));
+        client->aio_cb.aio_fildes = client->fd;
+        client->aio_cb.aio_buf = client->buffer;
+        client->aio_cb.aio_nbytes = BUFFER_SIZE - 1;
+        client->aio_cb.aio_offset = 0;
+        
+        // Настраиваем обработчик завершения
+        client->aio_cb.aio_sigevent.sigev_notify = SIGEV_THREAD;
+        client->aio_cb.aio_sigevent.sigev_notify_function = aio_completion_handler;
+        client->aio_cb.aio_sigevent.sigev_value.sival_ptr = &client->aio_cb;
+        client->aio_cb.aio_sigevent.sigev_notify_attributes = NULL;
+        
+        if (aio_read(&client->aio_cb) == -1) {
+            perror("aio_read");
+            client->active = 0;
+        }
+        
+    } else if (bytes_read == 0) {
+        // Клиент отключился
+        pthread_mutex_lock(&output_mutex);
+        print_current_time();
+        printf("клиент %d отключился\n", client->client_id);
+        pthread_mutex_unlock(&output_mutex);
+        
+        close(client->fd);
+        client->active = 0;
+    } else {
+        perror("aio_read error");
+        client->active = 0;
+    }
+}
+
+int find_free_client_slot() {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (!clients[i].active) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 int main() {
     int server_fd, new_client_fd;
     struct sockaddr_un server_addr, client_addr;
     socklen_t client_len;
-    struct pollfd fds[MAX_CLIENTS + 1];
-    client_t clients[MAX_CLIENTS];
-    int nfds = 1;
-    int i, rc;
     
     // Инициализация массива клиентов
-    for (i = 0; i < MAX_CLIENTS; i++) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        clients[i].active = 0;
         clients[i].fd = -1;
     }
     
@@ -60,121 +151,66 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
-    printf("Server listening on socket: %s\n", SOCKET_PATH);
-    
-    // Настраиваем poll для серверного сокета
-    fds[0].fd = server_fd;
-    fds[0].events = POLLIN;
-    fds[0].revents = 0;
+    printf("Сервер слушает на сокете: %s\n", SOCKET_PATH);
+    printf("Ожидание подключений...\n");
     
     while (1) {
-        rc = poll(fds, nfds, -1);
-        if (rc == -1) {
-            perror("poll");
-            break;
+        client_len = sizeof(client_addr);
+        new_client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (new_client_fd == -1) {
+            perror("accept");
+            continue;
         }
         
-        // Проверяем серверный сокет на новые подключения
-        if (fds[0].revents & POLLIN) {
-            client_len = sizeof(client_addr);
-            new_client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-            if (new_client_fd == -1) {
-                perror("accept");
-                continue;
-            }
-            
-            int client_index = -1;
-            for (i = 0; i < MAX_CLIENTS; i++) {
-                if (clients[i].fd == -1) {
-                    client_index = i;
-                    break;
-                }
-            }
-            
-            if (client_index != -1) {
-                clients[client_index].fd = new_client_fd;
-                
-                if (nfds < MAX_CLIENTS + 1) {
-                    fds[nfds].fd = new_client_fd;
-                    fds[nfds].events = POLLIN;
-                    fds[nfds].revents = 0;
-                    nfds++;
-                    printf("Client %d connected (total clients: %d)\n", 
-                           client_index, nfds - 1);
-                } else {
-                    printf("Too many clients, rejecting connection\n");
-                    close(new_client_fd);
-                }
-            } else {
-                printf("No free slots for new client\n");
-                close(new_client_fd);
-            }
+        int client_slot = find_free_client_slot();
+        if (client_slot == -1) {
+            pthread_mutex_lock(&output_mutex);
+            print_current_time();
+            printf("Нет свободных слотов для нового клиента\n");
+            pthread_mutex_unlock(&output_mutex);
+            close(new_client_fd);
+            continue;
         }
         
-        // Проверяем клиентские сокеты на данные
-        for (i = 1; i < nfds; i++) {
-            if (fds[i].revents & POLLIN) {
-                char temp_buffer[BUFFER_SIZE];
-                ssize_t bytes_read = read(fds[i].fd, temp_buffer, BUFFER_SIZE - 1);
-                
-                if (bytes_read > 0) {
-                    temp_buffer[bytes_read] = '\0';
-                    
-                    // Сохраняем оригинальный текст для вывода
-                    char original[BUFFER_SIZE];
-                    strncpy(original, temp_buffer, BUFFER_SIZE);
-                    
-                    // Преобразуем в верхний регистр
-                    for (int j = 0; j < bytes_read; j++) {
-                        temp_buffer[j] = toupper(temp_buffer[j]);
-                    }
-                    
-                    // Выводим на сервере
-                    printf("[Client %d original]: %s", i, original);
-                    printf("[Client %d converted]: %s", i, temp_buffer);
-                    fflush(stdout);
-                    
-                    // Отправляем преобразованный текст обратно клиенту
-                    if (write(fds[i].fd, temp_buffer, bytes_read) == -1) {
-                        perror("write back to client");
-                    }
-                    
-                } else if (bytes_read == 0) {
-                    printf("Client %d disconnected\n", i);
-                    close(fds[i].fd);
-                    
-                    for (int j = 0; j < MAX_CLIENTS; j++) {
-                        if (clients[j].fd == fds[i].fd) {
-                            clients[j].fd = -1;
-                            break;
-                        }
-                    }
-                    
-                    fds[i].fd = -1;
-                } else {
-                    perror("read");
-                }
-            }
+        // Инициализируем клиента
+        clients[client_slot].fd = new_client_fd;
+        clients[client_slot].client_id = next_client_id++;
+        clients[client_slot].active = 1;
+        
+        pthread_mutex_lock(&output_mutex);
+        print_current_time();
+        printf("клиент %d подключился\n", clients[client_slot].client_id);
+        pthread_mutex_unlock(&output_mutex);
+        
+        // Настраиваем асинхронное чтение
+        memset(&clients[client_slot].aio_cb, 0, sizeof(struct aiocb));
+        clients[client_slot].aio_cb.aio_fildes = new_client_fd;
+        clients[client_slot].aio_cb.aio_buf = clients[client_slot].buffer;
+        clients[client_slot].aio_cb.aio_nbytes = BUFFER_SIZE - 1;
+        clients[client_slot].aio_cb.aio_offset = 0;
+        
+        // Настраиваем обработчик завершения
+        clients[client_slot].aio_cb.aio_sigevent.sigev_notify = SIGEV_THREAD;
+        clients[client_slot].aio_cb.aio_sigevent.sigev_notify_function = aio_completion_handler;
+        clients[client_slot].aio_cb.aio_sigevent.sigev_value.sival_ptr = &clients[client_slot].aio_cb;
+        clients[client_slot].aio_cb.aio_sigevent.sigev_value.sival_ptr = &clients[client_slot];
+        clients[client_slot].aio_cb.aio_sigevent.sigev_notify_attributes = NULL;
+        
+        // Запускаем асинхронное чтение
+        if (aio_read(&clients[client_slot].aio_cb) == -1) {
+            perror("aio_read");
+            clients[client_slot].active = 0;
+            close(new_client_fd);
         }
         
-        // Убираем закрытые дескрипторы из массива poll
-        for (i = 1; i < nfds; i++) {
-            if (fds[i].fd == -1) {
-                for (int j = i; j < nfds - 1; j++) {
-                    fds[j] = fds[j + 1];
-                }
-                nfds--;
-                i--;
+        // Очищаем неактивных клиентов
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].active && clients[i].fd == -1) {
+                clients[i].active = 0;
             }
         }
     }
     
-    // Очистка
-    for (i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].fd != -1) {
-            close(clients[i].fd);
-        }
-    }
     close(server_fd);
     unlink(SOCKET_PATH);
     
