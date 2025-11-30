@@ -70,9 +70,6 @@ int main(int argc, char *argv[]) {
             perror("write");
             break;
         }
-        
-        // Ждем 1 секунду перед следующей отправкой
-        sleep(DELAY_SECONDS);
     }
     
     printf("Disconnecting from server\n");
