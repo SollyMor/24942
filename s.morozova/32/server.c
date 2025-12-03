@@ -22,7 +22,6 @@ typedef struct {
     int active;
     struct aiocb aio_cb;
     char buffer[BUFFER_SIZE];
-    char output_buffer[BUFFER_SIZE];
 } client_t;
 
 client_t clients[MAX_CLIENTS];
@@ -66,15 +65,14 @@ void aio_completion_handler(union sigval sigval) {
     int bytes_read = aio_return(req);
     
     if (bytes_read > 0) {
-        // Копируем данные чтобы избежать гонки
-        char temp_buffer[BUFFER_SIZE];
+        client->buffer[bytes_read] = '\0';
+        
+        // Создаем буфер для преобразованного текста
         char output_buffer[BUFFER_SIZE];
-        memcpy(temp_buffer, client->buffer, bytes_read);
-        temp_buffer[bytes_read] = '\0';
         
         // Преобразуем в верхний регистр
         for (int i = 0; i < bytes_read; i++) {
-            output_buffer[i] = toupper(temp_buffer[i]);
+            output_buffer[i] = toupper(client->buffer[i]);
         }
         output_buffer[bytes_read] = '\0';
         
@@ -103,6 +101,7 @@ void aio_completion_handler(union sigval sigval) {
             perror("aio_read");
             client->active = 0;
             close(client->fd);
+            client->fd = -1;
         }
         
     } else if (bytes_read == 0) {
@@ -116,7 +115,10 @@ void aio_completion_handler(union sigval sigval) {
         client->active = 0;
         client->fd = -1;
     } else {
-        perror("aio_read error");
+        // Ошибка чтения
+        if (errno != ECANCELED) {
+            perror("aio_read error");
+        }
         close(client->fd);
         client->active = 0;
         client->fd = -1;
@@ -152,6 +154,7 @@ void setup_aio_for_client(client_t *client) {
         perror("aio_read");
         client->active = 0;
         close(client->fd);
+        client->fd = -1;
     }
 }
 
@@ -164,6 +167,7 @@ int main() {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         clients[i].active = 0;
         clients[i].fd = -1;
+        clients[i].client_id = -1;
     }
     
     // Создаем сокет
@@ -231,16 +235,20 @@ int main() {
         // Настраиваем асинхронное чтение для нового клиента
         setup_aio_for_client(&clients[client_slot]);
         pthread_mutex_unlock(&clients_mutex);
-        
-        // Очищаем неактивных клиентов
-        pthread_mutex_lock(&clients_mutex);
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i].active && clients[i].fd == -1) {
-                clients[i].active = 0;
-            }
-        }
-        pthread_mutex_unlock(&clients_mutex);
     }
+    
+    // Закрываем все соединения перед выходом
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].active && clients[i].fd != -1) {
+            // Отменяем все ожидающие AIO операции
+            aio_cancel(clients[i].fd, &clients[i].aio_cb);
+            close(clients[i].fd);
+            clients[i].active = 0;
+            clients[i].fd = -1;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
     
     close(server_fd);
     unlink(SOCKET_PATH);
