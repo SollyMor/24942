@@ -9,18 +9,24 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/time.h>
-
-// ./server & server_pid=$! && sleep 1 && (./client 1 & ./client 2 & ./client 3 & wait) && kill "$server_pid" && wait "$server_pid" 2>/dev/null
+#include <signal.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
+#define TOTAL_MESSAGES 30  // Ожидаем 30 сообщений от каждого клиента
 
 typedef struct {
     int fd;
-    char buffer[BUFFER_SIZE];
+    int client_id;
     int message_count;
 } client_t;
+
+volatile sig_atomic_t running = 1;
+struct timeval start_time;
+int total_received_messages = 0;
+int clients_connected = 0;
+int clients_completed = 0;
 
 void print_current_time() {
     struct timeval tv;
@@ -31,7 +37,32 @@ void print_current_time() {
     tm_info = localtime(&tv.tv_sec);
     
     strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
-    printf("[%s.%03ld] ", time_buffer, tv.tv_usec / 1000);
+    printf("[%s.%06ld] ", time_buffer, tv.tv_usec);
+}
+
+void print_uptime() {
+    struct timeval end_time;
+    gettimeofday(&end_time, NULL);
+    
+    long seconds = end_time.tv_sec - start_time.tv_sec;
+    long microseconds = end_time.tv_usec - start_time.tv_usec;
+    
+    if (microseconds < 0) {
+        seconds--;
+        microseconds += 1000000;
+    }
+    
+    printf("\n=== Результаты работы сервера ===\n");
+    printf("Всего подключений: %d\n", clients_connected);
+    printf("Всего сообщений получено: %d (ожидалось: %d)\n", 
+           total_received_messages, clients_connected * TOTAL_MESSAGES);
+    printf("Время работы: %ld.%06ld секунд\n", seconds, microseconds);
+    printf("Средняя скорость: %.2f сообщений/сек\n", 
+           total_received_messages / (seconds + microseconds / 1000000.0));
+}
+
+void signal_handler(int sig) {
+    running = 0;
 }
 
 int main() {
@@ -42,10 +73,19 @@ int main() {
     client_t clients[MAX_CLIENTS];
     int nfds = 1;
     int i, rc;
+    int next_client_id = 0;
+    
+    // Засекаем время начала работы
+    gettimeofday(&start_time, NULL);
+    
+    // Настраиваем обработчик сигналов
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
     
     // Инициализация массива клиентов
     for (i = 0; i < MAX_CLIENTS; i++) {
         clients[i].fd = -1;
+        clients[i].client_id = -1;
         clients[i].message_count = 0;
     }
     
@@ -78,21 +118,24 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
-    printf("Server listening on socket: %s\n", SOCKET_PATH);
+    printf("Сервер запущен. Ожидание %d сообщений от каждого клиента\n", TOTAL_MESSAGES);
+    printf("Для завершения нажмите Ctrl+C\n\n");
     
     // Настраиваем poll для серверного сокета
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
     
-    while (1) {
-        rc = poll(fds, nfds, -1);
+    while (running) {
+        rc = poll(fds, nfds, 1000); // Таймаут 1 секунда
+        
         if (rc == -1) {
+            if (errno == EINTR) continue;
             perror("poll");
             break;
         }
         
-        // Проверяем серверный сокет на новые подключения
+        // Проверяем новые подключения
         if (fds[0].revents & POLLIN) {
             client_len = sizeof(client_addr);
             new_client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
@@ -111,6 +154,7 @@ int main() {
             
             if (client_index != -1) {
                 clients[client_index].fd = new_client_fd;
+                clients[client_index].client_id = next_client_id++;
                 clients[client_index].message_count = 0;
                 
                 if (nfds < MAX_CLIENTS + 1) {
@@ -118,22 +162,17 @@ int main() {
                     fds[nfds].events = POLLIN;
                     fds[nfds].revents = 0;
                     nfds++;
-                    print_current_time();
-                    printf("Client %d connected (total clients: %d)\n", 
-                           client_index, nfds - 1);
-                } else {
-                    print_current_time();
-                    printf("Too many clients, rejecting connection\n");
-                    close(new_client_fd);
                 }
-            } else {
+                
+                clients_connected++;
                 print_current_time();
-                printf("No free slots for new client\n");
+                printf("Клиент %d подключился\n", clients[client_index].client_id);
+            } else {
                 close(new_client_fd);
             }
         }
         
-        // Проверяем клиентские сокеты на данные
+        // Обрабатываем данные от клиентов
         for (i = 1; i < nfds; i++) {
             if (fds[i].revents & POLLIN) {
                 char temp_buffer[BUFFER_SIZE];
@@ -142,80 +181,71 @@ int main() {
                 if (bytes_read > 0) {
                     temp_buffer[bytes_read] = '\0';
                     
-                    // Находим индекс клиента в массиве
+                    // Находим клиента
                     int client_index = -1;
+                    int client_id = -1;
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].fd == fds[i].fd) {
                             client_index = j;
+                            client_id = clients[j].client_id;
                             clients[j].message_count++;
                             break;
                         }
                     }
-                    
-                    // Сохраняем оригинальный текст для вывода
-                    char original[BUFFER_SIZE];
-                    strncpy(original, temp_buffer, BUFFER_SIZE);
-                    original[strlen(original) - 1] = '\0'; // убираем \n для красивого вывода
                     
                     // Преобразуем в верхний регистр
                     for (int j = 0; j < bytes_read; j++) {
                         temp_buffer[j] = toupper(temp_buffer[j]);
                     }
                     
-                    // Выводим на сервере с временем и номером сообщения
-                    print_current_time();
-                    if (client_index != -1) {
-                        printf("Client %d, Message #%d: '%s' -> '%s'", 
-                               client_index, 
-                               clients[client_index].message_count,
-                               original, 
-                               temp_buffer);
-                    } else {
-                        printf("Unknown client, Message: '%s' -> '%s'", 
-                               original, 
-                               temp_buffer);
-                    }
+                    total_received_messages++;
                     
-                    // Отправляем преобразованный текст обратно клиенту
-                    if (write(fds[i].fd, temp_buffer, bytes_read) == -1) {
-                        perror("write back to client");
+                    // Выводим информацию о полученном сообщении
+                    print_current_time();
+                    printf("Клиент %d, сообщение %d/%d: %s", 
+                           client_id, 
+                           clients[client_index].message_count,
+                           TOTAL_MESSAGES,
+                           temp_buffer);
+                    
+                    // Отправляем ответ обратно клиенту
+                    write(fds[i].fd, temp_buffer, bytes_read);
+                    
+                    // Проверяем, завершил ли клиент свою работу
+                    if (clients[client_index].message_count >= TOTAL_MESSAGES) {
+                        print_current_time();
+                        printf("Клиент %d завершил отправку %d сообщений\n", 
+                               client_id, TOTAL_MESSAGES);
+                        close(fds[i].fd);
+                        fds[i].fd = -1;
+                        clients[client_index].fd = -1;
+                        clients_completed++;
                     }
                     
                 } else if (bytes_read == 0) {
-                    // Находим индекс клиента для вывода информации
-                    int client_index = -1;
+                    // Клиент отключился
+                    int client_id = -1;
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].fd == fds[i].fd) {
-                            client_index = j;
+                            client_id = clients[j].client_id;
+                            clients[j].fd = -1;
                             break;
                         }
                     }
                     
                     print_current_time();
-                    if (client_index != -1) {
-                        printf("Client %d disconnected (sent %d messages)\n", 
-                               client_index, clients[client_index].message_count);
-                    } else {
-                        printf("Unknown client disconnected\n");
+                    if (client_id != -1) {
+                        printf("Клиент %d отключился (отправлено %d сообщений)\n", 
+                               client_id, clients[client_index].message_count);
                     }
                     
                     close(fds[i].fd);
-                    
-                    for (int j = 0; j < MAX_CLIENTS; j++) {
-                        if (clients[j].fd == fds[i].fd) {
-                            clients[j].fd = -1;
-                            clients[j].message_count = 0;
-                            break;
-                        }
-                    }
-                    
                     fds[i].fd = -1;
-                } else {
-                    perror("read");
                 }
             }
         }
         
+        // Убираем закрытые дескрипторы
         for (i = 1; i < nfds; i++) {
             if (fds[i].fd == -1) {
                 for (int j = i; j < nfds - 1; j++) {
@@ -225,8 +255,18 @@ int main() {
                 i--;
             }
         }
+        
+        // Проверяем условие завершения
+        if (clients_connected > 0 && clients_completed >= clients_connected) {
+            printf("\nВсе клиенты завершили работу\n");
+            break;
+        }
     }
     
+    // Выводим итоговую статистику
+    print_uptime();
+    
+    // Закрываем все соединения
     for (i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd != -1) {
             close(clients[i].fd);
