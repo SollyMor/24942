@@ -182,12 +182,12 @@ int main() {
                     temp_buffer[bytes_read] = '\0';
                     
                     // Находим клиента
-                    int client_index = -1;
-                    int client_id = -1;
+                    int found_client_index = -1;
+                    int found_client_id = -1;
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].fd == fds[i].fd) {
-                            client_index = j;
-                            client_id = clients[j].client_id;
+                            found_client_index = j;
+                            found_client_id = clients[j].client_id;
                             clients[j].message_count++;
                             break;
                         }
@@ -202,41 +202,51 @@ int main() {
                     
                     // Выводим информацию о полученном сообщении
                     print_current_time();
-                    printf("Клиент %d, сообщение %d/%d: %s", 
-                           client_id, 
-                           clients[client_index].message_count,
-                           TOTAL_MESSAGES,
-                           temp_buffer);
+                    if (found_client_index != -1) {
+                        printf("Клиент %d, сообщение %d/%d: %s", 
+                               found_client_id, 
+                               clients[found_client_index].message_count,
+                               TOTAL_MESSAGES,
+                               temp_buffer);
+                    } else {
+                        printf("Неизвестный клиент, сообщение: %s", temp_buffer);
+                    }
                     
                     // Отправляем ответ обратно клиенту
                     write(fds[i].fd, temp_buffer, bytes_read);
                     
                     // Проверяем, завершил ли клиент свою работу
-                    if (clients[client_index].message_count >= TOTAL_MESSAGES) {
+                    if (found_client_index != -1 && 
+                        clients[found_client_index].message_count >= TOTAL_MESSAGES) {
                         print_current_time();
                         printf("Клиент %d завершил отправку %d сообщений\n", 
-                               client_id, TOTAL_MESSAGES);
+                               found_client_id, TOTAL_MESSAGES);
                         close(fds[i].fd);
                         fds[i].fd = -1;
-                        clients[client_index].fd = -1;
+                        clients[found_client_index].fd = -1;
                         clients_completed++;
                     }
                     
                 } else if (bytes_read == 0) {
                     // Клиент отключился
-                    int client_id = -1;
+                    int disconnected_client_id = -1;
+                    int disconnected_client_index = -1;
+                    
                     for (int j = 0; j < MAX_CLIENTS; j++) {
                         if (clients[j].fd == fds[i].fd) {
-                            client_id = clients[j].client_id;
+                            disconnected_client_id = clients[j].client_id;
+                            disconnected_client_index = j;
                             clients[j].fd = -1;
                             break;
                         }
                     }
                     
                     print_current_time();
-                    if (client_id != -1) {
+                    if (disconnected_client_id != -1) {
                         printf("Клиент %d отключился (отправлено %d сообщений)\n", 
-                               client_id, clients[client_index].message_count);
+                               disconnected_client_id, 
+                               disconnected_client_index != -1 ? 
+                               clients[disconnected_client_index].message_count : 0);
                     }
                     
                     close(fds[i].fd);
