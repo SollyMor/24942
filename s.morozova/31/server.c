@@ -13,12 +13,18 @@
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 64
 
+typedef struct {
+    int fd;
+    char buffer[BUFFER_SIZE];
+    int active;
+} client_info_t;
+
 double elapsed_ms_val = 0;
 
 void signal_handler(int sig) {
     printf("\nElapsed time: %.3f ms\n", elapsed_ms_val);
+    exit(EXIT_SUCCESS);
 }
-
 
 static double elapsed_ms(const struct timeval *start, const struct timeval *end) {
     long sec = end->tv_sec - start->tv_sec;
@@ -30,18 +36,20 @@ int main() {
     int server_fd, client_fd;
     struct sockaddr_un server_addr, client_addr;
     socklen_t client_len;
-    char buffer[BUFFER_SIZE];
     ssize_t nbytes;
     
-    int client_fds[MAX_CLIENTS];
+    client_info_t clients[MAX_CLIENTS];
     int max_fd;
     int i, n_clients = 0;
     fd_set read_fds;
-
-    struct timeval start_time;
-    struct timeval end_time;
-
+    
+    struct timeval start_time, end_time;
+    struct timeval program_start_time;
+    
     signal(SIGINT, signal_handler);
+    
+    // Запоминаем время старта программы
+    gettimeofday(&program_start_time, NULL);
     
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -68,31 +76,32 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
+    // Инициализируем массив клиентов
     for (i = 0; i < MAX_CLIENTS; i++) {
-        client_fds[i] = -1;
+        clients[i].fd = -1;
+        clients[i].active = 0;
     }
-
-    gettimeofday(&start_time, NULL);
-    double corr_elapsed = 0;
+    
+    printf("Server started. Listening on socket %s\n", SOCKET_PATH);
+    printf("Press Ctrl+C to stop the server\n");
+    
     while (1) {
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
         max_fd = server_fd;
         
+        // Добавляем дескрипторы активных клиентов в set
         for (i = 0; i < MAX_CLIENTS; i++) {
-            if (client_fds[i] != -1) {
-                FD_SET(client_fds[i], &read_fds);
-                if (client_fds[i] > max_fd) {
-                    max_fd = client_fds[i];
+            if (clients[i].fd != -1) {
+                FD_SET(clients[i].fd, &read_fds);
+                if (clients[i].fd > max_fd) {
+                    max_fd = clients[i].fd;
                 }
             }
         }
-        // write(STDOUT_FILENO, "Waiting for input...\n", 22);
-        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) == -1) {
-            perror("select");
-            break;
-        }
         
+        
+        // Проверяем новое соединение
         if (FD_ISSET(server_fd, &read_fds)) {
             client_len = sizeof(client_addr);
             client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
@@ -100,50 +109,98 @@ int main() {
                 perror("accept");
                 continue;
             }
+            
+            // Добавляем нового клиента
             for (i = 0; i < MAX_CLIENTS; i++) {
-                if (client_fds[i] == -1) {
-                    client_fds[i] = client_fd;
+                if (clients[i].fd == -1) {
+                    clients[i].fd = client_fd;
+                    clients[i].active = 1;
                     n_clients++;
+                    printf("Client %d connected (total clients: %d)\n", i, n_clients);
                     break;
                 }
             }
+            
             if (i == MAX_CLIENTS) {
+                printf("Too many clients, connection rejected\n");
                 close(client_fd);
             }
         }
         
+        // Проверяем данные от существующих клиентов
         for (i = 0; i < MAX_CLIENTS; i++) {
-            if (client_fds[i] != -1 && FD_ISSET(client_fds[i], &read_fds)) {
-                struct timeval start_time;
-                struct timeval end_time;
-                nbytes = read(client_fds[i], buffer, BUFFER_SIZE - 1);
+            if (clients[i].fd != -1 && FD_ISSET(clients[i].fd, &read_fds)) {
+                // Засекаем время начала чтения
+                gettimeofday(&start_time, NULL);
+                
+                nbytes = read(clients[i].fd, clients[i].buffer, BUFFER_SIZE - 1);
                 
                 if (nbytes <= 0) {
-                    close(client_fds[i]);
-                    client_fds[i] = -1;
+                    // Соединение закрыто или ошибка
+                    if (nbytes == 0) {
+                        printf("Client %d disconnected (total clients: %d)\n", 
+                               i, n_clients - 1);
+                    } else {
+                        perror("read");
+                    }
+                    
+                    close(clients[i].fd);
+                    clients[i].fd = -1;
+                    clients[i].active = 0;
                     n_clients--;
                 } else {
-                    buffer[nbytes] = '\0';
-                    for (int j = 0; j < nbytes; j++) {
-                        buffer[j] = toupper(buffer[j]);
-                    }
-                    write(STDOUT_FILENO, buffer, nbytes);
+                    // Вычисляем время чтения
                     gettimeofday(&end_time, NULL);
-                    double elapsed = elapsed_ms(&start_time, &end_time);
-                    if (corr_elapsed == 0) corr_elapsed = elapsed;
-                    elapsed_ms_val = elapsed - corr_elapsed;
+                    double processing_time = elapsed_ms(&start_time, &end_time);
+                    elapsed_ms_val = processing_time;
+                    
+                    // Обрабатываем полученные данные
+                    clients[i].buffer[nbytes] = '\0';
+                    
+                    // Преобразуем текст в верхний регистр
+                    for (int j = 0; j < nbytes; j++) {
+                        clients[i].buffer[j] = toupper(clients[i].buffer[j]);
+                    }
+                    
+                    // Создаем форматированный вывод с информацией о времени
+                    char output_buffer[BUFFER_SIZE + 128];
+                    int output_len = snprintf(output_buffer, sizeof(output_buffer),
+                                            "[Client %d, %.3f ms] ", 
+                                            i, processing_time);
+                    
+                    // Копируем преобразованные данные
+                    memcpy(output_buffer + output_len, clients[i].buffer, nbytes);
+                    output_len += nbytes;
+                    
+                    // Добавляем перенос строки если его нет
+                    if (nbytes > 0 && clients[i].buffer[nbytes-1] != '\n') {
+                        output_buffer[output_len++] = '\n';
+                    }
+                    
+                    // Выводим результат
+                    write(STDOUT_FILENO, output_buffer, output_len);
                 }
             }
         }
     }
     
+    printf("\nShutting down server...\n");
+    
+    // Закрываем все соединения
     for (i = 0; i < MAX_CLIENTS; i++) {
-        if (client_fds[i] != -1) {
-            close(client_fds[i]);
+        if (clients[i].fd != -1) {
+            close(clients[i].fd);
+            printf("Closed connection for client %d\n", i);
         }
     }
+    
     close(server_fd);
     unlink(SOCKET_PATH);
+    
+    // Вычисляем общее время работы сервера
+    gettimeofday(&end_time, NULL);
+    double total_time = elapsed_ms(&program_start_time, &end_time);
+    printf("Server ran for %.3f ms\n", total_time);
     
     return EXIT_SUCCESS;
 }
