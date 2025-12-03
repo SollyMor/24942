@@ -9,7 +9,8 @@
 #define SOCKET_PATH "/tmp/task31_socket"
 #define BUFFER_SIZE 1024
 #define DEFAULT_PREFIX "msg"
-#define SEND_DURATION_SEC 0.002
+#define SEND_DURATION_SEC 5.0  // Увеличил до 5 секунд
+#define DELAY_MICROSECONDS 10000  // Задержка 10 мс между сообщениями
 
 static double elapsed_seconds(const struct timeval *start, const struct timeval *current) {
     double seconds = (double)(current->tv_sec - start->tv_sec);
@@ -75,7 +76,10 @@ int main(int argc, char *argv[]) {
         const char *message = toggle ? message2 : message1;
         send_with_retry(client_fd, message);
         toggle = !toggle;
-        //usleep(10); // small pause between messages
+        
+        // Задержка между сообщениями
+        usleep(DELAY_MICROSECONDS);
+        
         gettimeofday(&current_time, NULL);
     }
     
