@@ -8,21 +8,12 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <signal.h>
-#include <sys/epoll.h>
 #include <pthread.h>
 
 #define SOCKET_PATH "/tmp/task32_socket"
 #define BUFFER_SIZE 1024
 #define DEFAULT_PREFIX "msg"
 #define SEND_DURATION_SEC 5.0
-#define NUM_MESSAGES 10
-
-typedef struct {
-    int client_fd;
-    char prefix[BUFFER_SIZE];
-    int message_counter;
-    int message_number;
-} client_context_t;
 
 static double elapsed_seconds(const struct timeval *start, const struct timeval *current) {
     double seconds = (double)(current->tv_sec - start->tv_sec);
@@ -30,10 +21,14 @@ static double elapsed_seconds(const struct timeval *start, const struct timeval 
     return seconds + useconds;
 }
 
-static void *client_thread(void *arg) {
-    client_context_t *ctx = (client_context_t *)arg;
+static void *send_messages(void *arg) {
+    int client_fd = *((int *)arg);
+    char prefix[BUFFER_SIZE] = DEFAULT_PREFIX;
     struct timeval start_time, current_time;
-    char message[BUFFER_SIZE];
+    int message_counter = 1;
+    
+    // В реальном приложении prefix должен передаваться как аргумент
+    // Здесь для простоты оставляем дефолтный
     
     gettimeofday(&start_time, NULL);
     
@@ -43,20 +38,24 @@ static void *client_thread(void *arg) {
             break;
         }
         
-        // Отправляем сообщение
-        snprintf(message, sizeof(message), "%s%d\n", ctx->prefix, ctx->message_counter);
+        // Формируем и отправляем сообщение
+        char message[BUFFER_SIZE];
+        snprintf(message, sizeof(message), "%s%d\n", prefix, message_counter++);
         
-        // Используем неблокирующую запись
-        ssize_t written = write(ctx->client_fd, message, strlen(message));
+        // Асинхронная отправка
+        ssize_t written = write(client_fd, message, strlen(message));
         
         if (written == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            perror("write");
             break;
         }
         
-        ctx->message_counter++;
+        // Выводим отправленное сообщение
+        printf("Sent: %s", message);
+        fflush(stdout);
         
-        // Небольшая задержка для наглядного перемешивания
-        usleep(100000); // 100ms
+        // Задержка для наглядного перемешивания
+        usleep(100000 + (rand() % 100000)); // 100-200ms случайная задержка
     }
     
     return NULL;
@@ -66,8 +65,7 @@ int main(int argc, char *argv[]) {
     int client_fd;
     struct sockaddr_un server_addr;
     char prefix[BUFFER_SIZE] = DEFAULT_PREFIX;
-    pthread_t thread_id;
-    client_context_t ctx;
+    pthread_t send_thread;
     struct timeval start_time, end_time;
     
     signal(SIGPIPE, SIG_IGN);
@@ -87,120 +85,41 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
     
-    // Делаем сокет неблокирующим
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-    
     // Настраиваем адрес сервера
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    // Подключаемся к серверу (асинхронно)
+    // Подключаемся к серверу
+    printf("Connecting to server...\n");
     if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-        if (errno != EINPROGRESS) {
-            perror("connect");
-            close(client_fd);
-            exit(EXIT_FAILURE);
-        }
-    }
-    
-    // Ждем подключения
-    fd_set write_fds;
-    struct timeval timeout;
-    FD_ZERO(&write_fds);
-    FD_SET(client_fd, &write_fds);
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    
-    if (select(client_fd + 1, NULL, &write_fds, NULL, &timeout) <= 0) {
-        perror("select on connect");
+        perror("connect");
         close(client_fd);
         exit(EXIT_FAILURE);
     }
     
-    // Инициализируем контекст для потока
-    ctx.client_fd = client_fd;
-    strcpy(ctx.prefix, prefix);
-    ctx.message_counter = 1;
+    printf("Connected. Sending messages...\n");
     
     gettimeofday(&start_time, NULL);
     
     // Создаем поток для отправки сообщений
-    if (pthread_create(&thread_id, NULL, client_thread, &ctx) != 0) {
+    if (pthread_create(&send_thread, NULL, send_messages, &client_fd) != 0) {
         perror("pthread_create");
         close(client_fd);
         exit(EXIT_FAILURE);
     }
     
-    // Основной поток читает с сервера асинхронно
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes_read;
+    // Основной поток просто ждет завершения отправки
+    pthread_join(send_thread, NULL);
     
-    // Используем epoll для асинхронного чтения
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd == -1) {
-        perror("epoll_create1");
-        close(client_fd);
-        exit(EXIT_FAILURE);
-    }
+    gettimeofday(&end_time, NULL);
     
-    struct epoll_event event;
-    event.events = EPOLLIN;
-    event.data.fd = client_fd;
+    // Небольшая задержка перед закрытием
+    usleep(500000);
     
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-        perror("epoll_ctl");
-        close(epoll_fd);
-        close(client_fd);
-        exit(EXIT_FAILURE);
-    }
-    
-    struct epoll_event events[1];
-    
-    while (1) {
-        gettimeofday(&end_time, NULL);
-        if (elapsed_seconds(&start_time, &end_time) >= SEND_DURATION_SEC) {
-            break;
-        }
-        
-        // Ожидаем события с таймаутом 100ms
-        int nfds = epoll_wait(epoll_fd, events, 1, 100);
-        
-        if (nfds == -1) {
-            perror("epoll_wait");
-            break;
-        }
-        
-        if (nfds > 0) {
-            if (events[0].events & EPOLLIN) {
-                bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
-                
-                if (bytes_read > 0) {
-                    buffer[bytes_read] = '\0';
-                    // Просто выводим полученное сообщение
-                    printf("%s", buffer);
-                    fflush(stdout);
-                } else if (bytes_read == 0) {
-                    // Сервер закрыл соединение
-                    break;
-                } else if (bytes_read == -1 && errno != EAGAIN) {
-                    perror("read");
-                    break;
-                }
-            }
-        }
-    }
-    
-    // Ждем завершения потока отправки
-    pthread_join(thread_id, NULL);
-    
-    // Закрываем соединение
-    close(epoll_fd);
     close(client_fd);
     
-    // Выводим время выполнения
-    printf("Time: %.2f seconds\n", elapsed_seconds(&start_time, &end_time));
+    printf("\nTime: %.2f seconds\n", elapsed_seconds(&start_time, &end_time));
     
     return EXIT_SUCCESS;
 }

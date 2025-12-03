@@ -5,6 +5,7 @@
 #include <sys/un.h>
 #include <string.h>
 #include <signal.h>
+#include <ctype.h>
 #include <pthread.h>
 
 #define SOCKET_PATH "/tmp/task32_socket"
@@ -13,30 +14,49 @@
 
 typedef struct {
     int client_fd;
+    int client_id;
 } client_info_t;
+
+static int client_counter = 0;
+
+static void to_uppercase(char *str) {
+    for (int i = 0; str[i]; i++) {
+        str[i] = toupper(str[i]);
+    }
+}
 
 static void *handle_client(void *arg) {
     client_info_t *info = (client_info_t *)arg;
     int client_fd = info->client_fd;
-    free(info);
+    int client_id = info->client_id;
     
     char buffer[BUFFER_SIZE];
     ssize_t bytes_read;
     
+    printf("Client %d connected\n", client_id);
+    
     while ((bytes_read = read(client_fd, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[bytes_read] = '\0';
         
-        // Эхо + префикс сервера
-        char response[BUFFER_SIZE * 2];
-        snprintf(response, sizeof(response), "echo: %s", buffer);
+        // Удаляем символ новой строки для обработки
+        if (buffer[strlen(buffer) - 1] == '\n') {
+            buffer[strlen(buffer) - 1] = '\0';
+        }
+        
+        // Преобразуем в верхний регистр
+        to_uppercase(buffer);
+        
+        // Выводим преобразованное сообщение
+        printf("Client %d: %s\n", client_id, buffer);
         
         // Небольшая задержка для демонстрации асинхронности
         usleep(50000); // 50ms
-        
-        write(client_fd, response, strlen(response));
     }
     
+    printf("Client %d disconnected\n", client_id);
     close(client_fd);
+    free(info);
+    
     return NULL;
 }
 
@@ -87,6 +107,7 @@ int main() {
         pthread_t thread_id;
         client_info_t *info = malloc(sizeof(client_info_t));
         info->client_fd = client_fd;
+        info->client_id = ++client_counter;
         
         if (pthread_create(&thread_id, NULL, handle_client, info) != 0) {
             perror("pthread_create");
