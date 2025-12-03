@@ -13,17 +13,24 @@
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 64
 
-double elapsed_ms_val = 0;
-
-void signal_handler(int sig) {
-    printf("\nElapsed time: %.3f ms\n", elapsed_ms_val);
-}
-
+struct timeval program_start_time;
 
 static double elapsed_ms(const struct timeval *start, const struct timeval *end) {
     long sec = end->tv_sec - start->tv_sec;
     long usec = end->tv_usec - start->tv_usec;
     return (double)sec * 1000.0 + (double)usec / 1000.0;
+}
+
+void print_total_uptime() {
+    struct timeval end_time;
+    gettimeofday(&end_time, NULL);
+    double total_time_ms = elapsed_ms(&program_start_time, &end_time);
+    printf("Время работы: %.3f ms\n", total_time_ms);
+}
+
+void signal_handler(int sig) {
+    print_total_uptime();
+    exit(0);
 }
 
 int main() {
@@ -35,12 +42,12 @@ int main() {
     
     int client_fds[MAX_CLIENTS];
     int max_fd;
-    int i, n_clients = 0;
+    int i;
     fd_set read_fds;
 
-    struct timeval start_time;
-    struct timeval end_time;
-
+    // Засекаем время начала работы программы
+    gettimeofday(&program_start_time, NULL);
+    
     signal(SIGINT, signal_handler);
     
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -72,8 +79,6 @@ int main() {
         client_fds[i] = -1;
     }
 
-    gettimeofday(&start_time, NULL);
-    double corr_elapsed = 0;
     while (1) {
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
@@ -87,7 +92,7 @@ int main() {
                 }
             }
         }
-        // write(STDOUT_FILENO, "Waiting for input...\n", 22);
+        
         if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) == -1) {
             perror("select");
             break;
@@ -103,7 +108,6 @@ int main() {
             for (i = 0; i < MAX_CLIENTS; i++) {
                 if (client_fds[i] == -1) {
                     client_fds[i] = client_fd;
-                    n_clients++;
                     break;
                 }
             }
@@ -114,24 +118,17 @@ int main() {
         
         for (i = 0; i < MAX_CLIENTS; i++) {
             if (client_fds[i] != -1 && FD_ISSET(client_fds[i], &read_fds)) {
-                struct timeval start_time;
-                struct timeval end_time;
                 nbytes = read(client_fds[i], buffer, BUFFER_SIZE - 1);
                 
                 if (nbytes <= 0) {
                     close(client_fds[i]);
                     client_fds[i] = -1;
-                    n_clients--;
                 } else {
                     buffer[nbytes] = '\0';
                     for (int j = 0; j < nbytes; j++) {
                         buffer[j] = toupper(buffer[j]);
                     }
                     write(STDOUT_FILENO, buffer, nbytes);
-                    gettimeofday(&end_time, NULL);
-                    double elapsed = elapsed_ms(&start_time, &end_time);
-                    if (corr_elapsed == 0) corr_elapsed = elapsed;
-                    elapsed_ms_val = elapsed - corr_elapsed;
                 }
             }
         }
@@ -145,5 +142,6 @@ int main() {
     close(server_fd);
     unlink(SOCKET_PATH);
     
+    print_total_uptime();
     return EXIT_SUCCESS;
 }
