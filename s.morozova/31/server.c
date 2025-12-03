@@ -241,6 +241,7 @@ int main() {
                     
                     print_current_time();
                     if (disconnected_client_id != -1) {
+                        printf("Клиент %d отключился (отправлено %d сообщений)\n", 
                                disconnected_client_id, 
                                disconnected_client_index != -1 ? 
                                clients[disconnected_client_index].message_count : 0);
