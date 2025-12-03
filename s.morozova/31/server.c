@@ -10,6 +10,8 @@
 #include <time.h>
 #include <sys/time.h>
 
+// ./server & server_pid=$! && sleep 1 && (./client 1 & ./client 2 & ./client 3 & wait) && kill "$server_pid" && wait "$server_pid" 2>/dev/null
+
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
@@ -214,7 +216,6 @@ int main() {
             }
         }
         
-        // Убираем закрытые дескрипторы из массива poll
         for (i = 1; i < nfds; i++) {
             if (fds[i].fd == -1) {
                 for (int j = i; j < nfds - 1; j++) {
@@ -226,7 +227,6 @@ int main() {
         }
     }
     
-    // Очистка
     for (i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd != -1) {
             close(clients[i].fd);
