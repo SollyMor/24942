@@ -13,7 +13,7 @@
 #define SOCKET_PATH "/tmp/task32_socket"
 #define BUFFER_SIZE 1024
 #define DEFAULT_PREFIX "msg"
-#define SEND_DURATION_SEC 5.0
+#define SEND_DURATION_SEC 15.0
 
 static double elapsed_seconds(const struct timeval *start, const struct timeval *current) {
     double seconds = (double)(current->tv_sec - start->tv_sec);
