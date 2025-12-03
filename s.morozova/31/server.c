@@ -14,7 +14,7 @@
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
-#define TOTAL_MESSAGES 30  // Ожидаем 30 сообщений от каждого клиента
+#define TOTAL_MESSAGES 50  // Ожидаем 30 сообщений от каждого клиента
 
 typedef struct {
     int fd;
@@ -201,11 +201,9 @@ int main() {
                     // Выводим информацию о полученном сообщении
                     print_current_time();
                     if (found_client_index != -1) {
-                        printf("Клиент %d, - %d/%d: %s", 
+                        printf("Клиент %d, - %d: %s", 
                                found_client_id, 
-                               clients[found_client_index].message_count,
-                               TOTAL_MESSAGES,
-                               temp_buffer);
+                               clients[found_client_index].message_count);
                     } else {
                         printf("Неизвестный клиент, сообщение: %s", temp_buffer);
                     }
