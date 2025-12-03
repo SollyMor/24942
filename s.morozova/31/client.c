@@ -1,52 +1,47 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <signal.h>
-#include <time.h>
+#include <string.h>
+#include <sys/time.h>
 
-#define SOCKET_PATH "/tmp/case_converter_socket"
+#define SOCKET_PATH "/tmp/task31_socket"
 #define BUFFER_SIZE 1024
-#define MESSAGE_COUNT 50
-#define DELAY_MICROSECONDS 10000 
+#define DEFAULT_PREFIX "msg"
+#define SEND_DURATION_SEC 0.002
 
-int client_fd = -1;
+static double elapsed_seconds(const struct timeval *start, const struct timeval *current) {
+    double seconds = (double)(current->tv_sec - start->tv_sec);
+    double useconds = (double)(current->tv_usec - start->tv_usec) / 1000000.0;
+    return seconds + useconds;
+}
 
-void cleanup(int sig) {
-    if (client_fd != -1) {
-        close(client_fd);
+static void send_with_retry(int fd, const char *message) {
+    size_t to_write = strlen(message);
+    size_t written_total = 0;
+
+    while (written_total < to_write) {
+        ssize_t written = write(fd, message + written_total, to_write - written_total);
+        if (written == -1) {
+            perror("write");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+        written_total += (size_t)written;
     }
-    exit(0);
 }
 
 int main(int argc, char *argv[]) {
+    int client_fd;
     struct sockaddr_un server_addr;
-    char buffer[BUFFER_SIZE];
-    char response_buffer[BUFFER_SIZE];
-    struct timespec sleep_time;
+    char prefix[BUFFER_SIZE] = DEFAULT_PREFIX;
+    char message1[BUFFER_SIZE];
+    char message2[BUFFER_SIZE];
+    struct timeval start_time;
+    struct timeval current_time;
+    int toggle = 0;
     
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <text>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-    
-    strncpy(buffer, argv[1], BUFFER_SIZE - 1);
-    buffer[BUFFER_SIZE - 1] = '\0';
-    
-    if (buffer[strlen(buffer) - 1] != '\n') {
-        strncat(buffer, "\n", BUFFER_SIZE - strlen(buffer) - 1);
-    }
-    
-    signal(SIGINT, cleanup);
-    signal(SIGTERM, cleanup);
-    
-    // Настраиваем время задержки
-    sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = DELAY_MICROSECONDS * 1000;
-    
-    // Создаем сокет
     client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (client_fd == -1) {
         perror("socket");
@@ -57,26 +52,34 @@ int main(int argc, char *argv[]) {
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+    if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
         close(client_fd);
         exit(EXIT_FAILURE);
     }
-    
-    for (int i = 0; i < MESSAGE_COUNT; i++) {
-        // Отправляем сообщение
-        if (write(client_fd, buffer, strlen(buffer)) == -1) {
-            break;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], "--prefix=", 9) == 0 && strlen(argv[i] + 9) > 0) {
+            strncpy(prefix, argv[i] + 9, sizeof(prefix) - 1);
+            prefix[sizeof(prefix) - 1] = '\0';
         }
-        
-        // Читаем ответ (но не выводим его)
-        read(client_fd, response_buffer, BUFFER_SIZE - 1);
-        
-        // Задержка между сообщениями
-        nanosleep(&sleep_time, NULL);
+    }
+
+    snprintf(message1, sizeof(message1), "%s1\n", prefix);
+    snprintf(message2, sizeof(message2), "%s2\n", prefix);
+
+    gettimeofday(&start_time, NULL);
+    current_time = start_time;
+
+    while (elapsed_seconds(&start_time, &current_time) < SEND_DURATION_SEC) {
+        const char *message = toggle ? message2 : message1;
+        send_with_retry(client_fd, message);
+        toggle = !toggle;
+        //usleep(10); // small pause between messages
+        gettimeofday(&current_time, NULL);
     }
     
     close(client_fd);
     
-    return 0;
+    return EXIT_SUCCESS;
 }
