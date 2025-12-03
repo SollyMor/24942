@@ -10,8 +10,8 @@
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define BUFFER_SIZE 1024
-#define MESSAGE_COUNT 30
-#define DELAY_MICROSECONDS 1000  // 1 миллисекунда для наглядности
+#define MESSAGE_COUNT 50
+#define DELAY_MICROSECONDS 10000 
 
 int client_fd = -1;
 
@@ -69,58 +69,24 @@ int main(int argc, char *argv[]) {
     }
     
     printf("Подключено. Отправляю текст: %s", buffer);
-    printf("Буду отправлять %d сообщений с задержкой %d микросекунд\n\n", 
-           MESSAGE_COUNT, DELAY_MICROSECONDS);
     
     for (int i = 0; i < MESSAGE_COUNT; i++) {
-        // Засекаем время начала отправки
-        gettimeofday(&start_time, NULL);
-        
         // Отправляем сообщение (синхронно)
         if (write(client_fd, buffer, strlen(buffer)) == -1) {
             perror("write");
             break;
         }
         
-        printf("Отправлено сообщение %d/%d\n", i+1, MESSAGE_COUNT);
+        printf("%d/%d\n", i+1, MESSAGE_COUNT);
         
         // Ждем ответ от сервера (синхронно)
         ssize_t bytes_received = read(client_fd, response_buffer, BUFFER_SIZE - 1);
-        
-        if (bytes_received > 0) {
-            response_buffer[bytes_received] = '\0';
-            
-            // Засекаем время получения ответа
-            gettimeofday(&end_time, NULL);
-            
-            // Вычисляем время отклика
-            long response_time = (end_time.tv_sec - start_time.tv_sec) * 1000000L + 
-                               (end_time.tv_usec - start_time.tv_usec);
-            total_response_time += response_time;
-            successful_messages++;
-            
-            printf("  Получен ответ: %s", response_buffer);
-            printf("  Время отклика: %ld микросекунд\n", response_time);
-            
-        } else if (bytes_received == 0) {
-            printf("  Сервер отключился\n");
-            break;
-        } else {
-            perror("  Ошибка чтения");
-            break;
-        }
+    
         
         // Задержка между сообщениями
         nanosleep(&sleep_time, NULL);
     }
-    
-    // Выводим статистику клиента
-    printf("\n=== Статистика клиента ===\n");
-    printf("Успешно отправлено сообщений: %d/%d\n", successful_messages, MESSAGE_COUNT);
-    if (successful_messages > 0) {
-        printf("Среднее время отклика: %.2f микросекунд\n", 
-               (double)total_response_time / successful_messages);
-    }
+
     printf("Отключаюсь от сервера\n");
     
     close(client_fd);

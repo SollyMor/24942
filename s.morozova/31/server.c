@@ -118,16 +118,14 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
-    printf("Сервер запущен. Ожидание %d сообщений от каждого клиента\n", TOTAL_MESSAGES);
-    printf("Для завершения нажмите Ctrl+C\n\n");
+    printf("Сервер запущен");
     
-    // Настраиваем poll для серверного сокета
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
     
     while (running) {
-        rc = poll(fds, nfds, 1000); // Таймаут 1 секунда
+        rc = poll(fds, nfds, 10000); // Таймаут 1 секунда
         
         if (rc == -1) {
             if (errno == EINTR) continue;
@@ -203,7 +201,7 @@ int main() {
                     // Выводим информацию о полученном сообщении
                     print_current_time();
                     if (found_client_index != -1) {
-                        printf("Клиент %d, сообщение %d/%d: %s", 
+                        printf("Клиент %d, - %d/%d: %s", 
                                found_client_id, 
                                clients[found_client_index].message_count,
                                TOTAL_MESSAGES,
@@ -243,7 +241,6 @@ int main() {
                     
                     print_current_time();
                     if (disconnected_client_id != -1) {
-                        printf("Клиент %d отключился (отправлено %d сообщений)\n", 
                                disconnected_client_id, 
                                disconnected_client_index != -1 ? 
                                clients[disconnected_client_index].message_count : 0);
