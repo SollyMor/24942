@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/time.h>
+#include <errno.h>  // Добавляем для EINTR и других errno кодов
 
 #define SOCKET_PATH "/tmp/task31_socket"
 #define BUFFER_SIZE 1024
@@ -45,6 +46,7 @@ int main() {
     
     struct timeval start_time, end_time;
     struct timeval program_start_time;
+    struct timeval select_timeout;  // Таймаут для select
     
     signal(SIGINT, signal_handler);
     
@@ -100,6 +102,29 @@ int main() {
             }
         }
         
+        // Устанавливаем таймаут для select (0.1 секунды)
+        select_timeout.tv_sec = 0;
+        select_timeout.tv_usec = 100000;  // 100 мс
+        
+        // Ждем активности на любом из дескрипторов
+        int select_result = select(max_fd + 1, &read_fds, NULL, NULL, &select_timeout);
+        
+        if (select_result == -1) {
+            // Проверяем, был ли select прерван сигналом
+            if (errno == EINTR) {
+                // Сигнал прервал select, выходим
+                printf("\nSelect interrupted by signal\n");
+                break;
+            }
+            perror("select");
+            break;
+        }
+        
+        if (select_result == 0) {
+            // Таймаут, ничего не произошло
+            // Можно использовать для периодических задач
+            continue;
+        }
         
         // Проверяем новое соединение
         if (FD_ISSET(server_fd, &read_fds)) {
@@ -141,7 +166,13 @@ int main() {
                         printf("Client %d disconnected (total clients: %d)\n", 
                                i, n_clients - 1);
                     } else {
-                        perror("read");
+                        // Проверяем, была ли ошибка из-за неблокирующего режима
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // Нет данных для чтения, продолжаем
+                            continue;
+                        } else {
+                            perror("read");
+                        }
                     }
                     
                     close(clients[i].fd);
@@ -149,7 +180,7 @@ int main() {
                     clients[i].active = 0;
                     n_clients--;
                 } else {
-                    // Вычисляем время чтения
+                    // Вычисляем время чтения и обработки
                     gettimeofday(&end_time, NULL);
                     double processing_time = elapsed_ms(&start_time, &end_time);
                     elapsed_ms_val = processing_time;
