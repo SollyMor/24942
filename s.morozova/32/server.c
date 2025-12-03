@@ -3,147 +3,102 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <fcntl.h>
 #include <string.h>
-#include <errno.h>
-#include <sys/time.h>
 #include <signal.h>
-#include <aio.h>
+#include <pthread.h>
 
 #define SOCKET_PATH "/tmp/task32_socket"
 #define BUFFER_SIZE 1024
-#define DEFAULT_PREFIX "msg"
-#define SEND_DURATION_SEC 5.0
-#define MAX_PENDING_OPS 10
+#define MAX_CLIENTS 10
 
-static double elapsed_seconds(const struct timeval *start, const struct timeval *current) {
-    double seconds = (double)(current->tv_sec - start->tv_sec);
-    double useconds = (double)(current->tv_usec - start->tv_usec) / 1000000.0;
-    return seconds + useconds;
+typedef struct {
+    int client_fd;
+} client_info_t;
+
+static void *handle_client(void *arg) {
+    client_info_t *info = (client_info_t *)arg;
+    int client_fd = info->client_fd;
+    free(info);
+    
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    
+    while ((bytes_read = read(client_fd, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytes_read] = '\0';
+        
+        // Эхо + префикс сервера
+        char response[BUFFER_SIZE * 2];
+        snprintf(response, sizeof(response), "echo: %s", buffer);
+        
+        // Небольшая задержка для демонстрации асинхронности
+        usleep(50000); // 50ms
+        
+        write(client_fd, response, strlen(response));
+    }
+    
+    close(client_fd);
+    return NULL;
 }
 
-int main(int argc, char *argv[]) {
-    int client_fd;
-    struct sockaddr_un server_addr;
-    char prefix[BUFFER_SIZE] = DEFAULT_PREFIX;
-    struct timeval start_time;
-    struct timeval current_time;
+int main() {
+    int server_fd, client_fd;
+    struct sockaddr_un server_addr, client_addr;
+    socklen_t client_len;
     
-    struct aiocb aio_ops[MAX_PENDING_OPS];
-    char buffers[MAX_PENDING_OPS][BUFFER_SIZE];
-    int pending_count = 0;
+    // Удаляем старый сокет, если существует
+    unlink(SOCKET_PATH);
     
-    signal(SIGPIPE, SIG_IGN);
-
     // Создаем сокет
-    client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (client_fd == -1) {
+    server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server_fd == -1) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
     
-    // Настраиваем адрес сервера
+    // Настраиваем адрес
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    // Подключаемся к серверу
-    if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-        perror("connect");
-        close(client_fd);
+    // Привязываем сокет
+    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+        perror("bind");
         exit(EXIT_FAILURE);
     }
     
-    // Обрабатываем аргументы командной строки
-    for (int i = 1; i < argc; ++i) {
-        if (strncmp(argv[i], "--prefix=", 9) == 0 && strlen(argv[i] + 9) > 0) {
-            strncpy(prefix, argv[i] + 9, sizeof(prefix) - 1);
-            prefix[sizeof(prefix) - 1] = '\0';
-        }
+    // Слушаем соединения
+    if (listen(server_fd, MAX_CLIENTS) == -1) {
+        perror("listen");
+        exit(EXIT_FAILURE);
     }
-
-    gettimeofday(&start_time, NULL);
-    int message_counter = 0;
-
+    
+    printf("Server listening on %s\n", SOCKET_PATH);
+    
     while (1) {
-        gettimeofday(&current_time, NULL);
-        if (elapsed_seconds(&start_time, &current_time) >= SEND_DURATION_SEC) {
-            break;
+        client_len = sizeof(client_addr);
+        client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        
+        if (client_fd == -1) {
+            perror("accept");
+            continue;
         }
         
-        // Если есть свободные слоты для AIO операций
-        if (pending_count < MAX_PENDING_OPS) {
-            // Подготавливаем сообщение
-            int idx = pending_count;
-            snprintf(buffers[idx], BUFFER_SIZE, "%s%d\n", prefix, ++message_counter);
-            
-            // Настраиваем асинхронную операцию записи
-            memset(&aio_ops[idx], 0, sizeof(struct aiocb));
-            aio_ops[idx].aio_fildes = client_fd;
-            aio_ops[idx].aio_buf = buffers[idx];
-            aio_ops[idx].aio_nbytes = strlen(buffers[idx]);
-            aio_ops[idx].aio_offset = 0;
-            aio_ops[idx].aio_sigevent.sigev_notify = SIGEV_NONE;
-            
-            // Запускаем асинхронную запись
-            if (aio_write(&aio_ops[idx]) == 0) {
-                pending_count++;
-            }
+        // Создаем поток для каждого клиента
+        pthread_t thread_id;
+        client_info_t *info = malloc(sizeof(client_info_t));
+        info->client_fd = client_fd;
+        
+        if (pthread_create(&thread_id, NULL, handle_client, info) != 0) {
+            perror("pthread_create");
+            free(info);
+            close(client_fd);
         }
         
-        // Проверяем завершенные операции
-        for (int i = 0; i < pending_count; i++) {
-            int status = aio_error(&aio_ops[i]);
-            
-            if (status == 0) {
-                // Операция завершена
-                ssize_t result = aio_return(&aio_ops[i]);
-                if (result > 0) {
-                    // Успешно отправлено
-                } else if (result == 0) {
-                    // Сервер закрыл соединение
-                    close(client_fd);
-                    return EXIT_SUCCESS;
-                }
-                
-                // Удаляем завершенную операцию из массива
-                for (int j = i; j < pending_count - 1; j++) {
-                    aio_ops[j] = aio_ops[j + 1];
-                    memcpy(buffers[j], buffers[j + 1], BUFFER_SIZE);
-                }
-                pending_count--;
-                i--;
-            } else if (status != EINPROGRESS) {
-                // Ошибка
-                perror("aio_write error");
-                close(client_fd);
-                return EXIT_FAILURE;
-            }
-        }
-        
-        usleep(1000); // Небольшая пауза
+        pthread_detach(thread_id);
     }
     
-    // Ждем завершения всех оставшихся операций
-    while (pending_count > 0) {
-        for (int i = 0; i < pending_count; i++) {
-            int status = aio_error(&aio_ops[i]);
-            
-            if (status == 0) {
-                aio_return(&aio_ops[i]);
-                
-                for (int j = i; j < pending_count - 1; j++) {
-                    aio_ops[j] = aio_ops[j + 1];
-                    memcpy(buffers[j], buffers[j + 1], BUFFER_SIZE);
-                }
-                pending_count--;
-                i--;
-            }
-        }
-        usleep(1000);
-    }
-    
-    close(client_fd);
+    close(server_fd);
+    unlink(SOCKET_PATH);
     
     return EXIT_SUCCESS;
 }
