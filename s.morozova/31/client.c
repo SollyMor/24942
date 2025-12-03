@@ -6,7 +6,6 @@
 #include <sys/un.h>
 #include <signal.h>
 #include <time.h>
-#include <sys/time.h>
 
 #define SOCKET_PATH "/tmp/case_converter_socket"
 #define BUFFER_SIZE 1024
@@ -27,9 +26,6 @@ int main(int argc, char *argv[]) {
     char buffer[BUFFER_SIZE];
     char response_buffer[BUFFER_SIZE];
     struct timespec sleep_time;
-    struct timeval start_time, end_time;
-    long total_response_time = 0;
-    int successful_messages = 0;
     
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <text>\n", argv[0]);
@@ -48,7 +44,7 @@ int main(int argc, char *argv[]) {
     
     // Настраиваем время задержки
     sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = DELAY_MICROSECONDS * 1000; // микросекунды в наносекунды
+    sleep_time.tv_nsec = DELAY_MICROSECONDS * 1000;
     
     // Создаем сокет
     client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -61,33 +57,24 @@ int main(int argc, char *argv[]) {
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    printf("Подключаюсь к серверу...\n");
     if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
         close(client_fd);
         exit(EXIT_FAILURE);
     }
     
-    printf("Подключено. Отправляю текст: %s", buffer);
-    
     for (int i = 0; i < MESSAGE_COUNT; i++) {
-        // Отправляем сообщение (синхронно)
+        // Отправляем сообщение
         if (write(client_fd, buffer, strlen(buffer)) == -1) {
-            perror("write");
             break;
         }
         
-        printf("%d/%d\n", i+1, MESSAGE_COUNT);
-        
-        // Ждем ответ от сервера (синхронно)
-        ssize_t bytes_received = read(client_fd, response_buffer, BUFFER_SIZE - 1);
-    
+        // Читаем ответ (но не выводим его)
+        read(client_fd, response_buffer, BUFFER_SIZE - 1);
         
         // Задержка между сообщениями
         nanosleep(&sleep_time, NULL);
     }
-
-    printf("Отключаюсь от сервера\n");
     
     close(client_fd);
     
