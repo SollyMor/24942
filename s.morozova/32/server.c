@@ -1,329 +1,278 @@
-#include <stdio.h>
-#include <stdlib.h>
+#define _POSIX_C_SOURCE 200809L
+
 #include <unistd.h>
+#include <stdio.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <string.h>
-#include <errno.h>
-#include <signal.h>
-#include <liburing.h>
-#include <ctype.h>
-#include <time.h>
+#include <sys/select.h>
+#include <aio.h>
 
-#define SOCKET_PATH "/tmp/task31_socket"
-#define BUFFER_SIZE 1024
-#define MAX_CLIENTS 64
-#define QUEUE_DEPTH 256
-#define MAX_MSG_LEN 128
+static const char *socket_path = "/tmp/server_socket";
+
+#define MAX_CLIENTS 100
+#define BUFFER_SIZE 8192
 
 typedef struct {
     int fd;
-    int client_id;
+    struct aiocb aio;
     char buffer[BUFFER_SIZE];
-    int buf_pos;
-    struct timeval start_time;
-} client_ctx_t;
+    int active;
+    int pending;
+} client_info_t;
 
-typedef struct {
-    int type;  // 0: accept, 1: read, 2: write
-    union {
-        struct {
-            int client_id;
-        } accept_data;
-        struct {
-            int client_id;
-            char *data;
-            size_t len;
-        } write_data;
-    };
-} request_data_t;
-
-volatile sig_atomic_t keep_running = 1;
-int total_requests = 0;
-double total_time = 0.0;
-
-void signal_handler(int sig) {
-    printf("\n=== Server Statistics ===\n");
-    printf("Total requests processed: %d\n", total_requests);
-    printf("Total processing time: %.3f ms\n", total_time);
-    if (total_requests > 0) {
-        printf("Average processing time: %.3f ms\n", total_time / total_requests);
-    }
-    printf("Shutting down...\n");
-    keep_running = 0;
-}
-
-static double elapsed_ms(const struct timeval *start, const struct timeval *end) {
-    long sec = end->tv_sec - start->tv_sec;
-    long usec = end->tv_usec - start->tv_usec;
-    return (double)sec * 1000.0 + (double)usec / 1000.0;
-}
-
-// Добавление операции accept в очередь
-static int add_accept_request(struct io_uring *ring, int server_fd, 
-                             client_ctx_t *client, int client_id) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    if (!sqe) return -1;
-    
-    client->fd = -1;
-    client->client_id = client_id;
-    client->buf_pos = 0;
-    
-    request_data_t *data = malloc(sizeof(request_data_t));
-    data->type = 0;
-    data->accept_data.client_id = client_id;
-    
-    io_uring_prep_accept(sqe, server_fd, NULL, NULL, 0);
-    io_uring_sqe_set_data(sqe, data);
-    
-    return 0;
-}
-
-// Добавление операции read в очередь
-static int add_read_request(struct io_uring *ring, client_ctx_t *client) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    if (!sqe) return -1;
-    
-    // Используем часть буфера для чтения
-    int space = BUFFER_SIZE - client->buf_pos;
-    if (space <= 0) {
-        fprintf(stderr, "Buffer full for client %d\n", client->client_id);
-        return -1;
-    }
-    
-    gettimeofday(&client->start_time, NULL);
-    
-    io_uring_prep_read(sqe, client->fd, 
-                      client->buffer + client->buf_pos, 
-                      space, 0);
-    
-    request_data_t *data = malloc(sizeof(request_data_t));
-    data->type = 1;
-    data->accept_data.client_id = client->client_id;
-    io_uring_sqe_set_data(sqe, data);
-    
-    return 0;
-}
-
-// Обработка прочитанных данных
-static void process_data(client_ctx_t *client, int bytes_read) {
-    if (bytes_read <= 0) {
-        printf("Client %d disconnected\n", client->client_id);
-        close(client->fd);
-        client->fd = -1;
-        return;
-    }
-    
-    client->buf_pos += bytes_read;
-    client->buffer[client->buf_pos] = '\0';
-    
-    // Ищем завершенные сообщения (по \n)
-    int msg_start = 0;
-    for (int i = 0; i < client->buf_pos; i++) {
-        if (client->buffer[i] == '\n') {
-            // Нашли конец сообщения
-            struct timeval end_time;
-            gettimeofday(&end_time, NULL);
-            
-            double proc_time = elapsed_ms(&client->start_time, &end_time);
-            total_time += proc_time;
-            total_requests++;
-            
-            // Преобразуем в верхний регистр
-            for (int j = msg_start; j <= i; j++) {
-                client->buffer[j] = toupper(client->buffer[j]);
-            }
-            
-            // Выводим результат
-            char output[MAX_MSG_LEN];
-            int len = snprintf(output, sizeof(output),
-                             "[Client %d, time: %.3f ms] ",
-                             client->client_id, proc_time);
-            
-            write(STDOUT_FILENO, output, len);
-            write(STDOUT_FILENO, client->buffer + msg_start, i - msg_start + 1);
-            
-            msg_start = i + 1;
+static ssize_t robust_write(int fd, const void *buf, size_t count) {
+    const char *p = (const char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
         }
+        p += (size_t)n;
+        left -= (size_t)n;
     }
-    
-    // Сдвигаем оставшиеся данные в начало буфера
-    if (msg_start > 0) {
-        int remaining = client->buf_pos - msg_start;
-        if (remaining > 0) {
-            memmove(client->buffer, client->buffer + msg_start, remaining);
-        }
-        client->buf_pos = remaining;
-    }
+    return (ssize_t)count;
 }
 
-int main() {
-    struct io_uring ring;
-    int server_fd;
-    struct sockaddr_un server_addr;
-    client_ctx_t clients[MAX_CLIENTS];
-    int next_client_id = 0;
-    
-    // Инициализация io_uring
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        exit(EXIT_FAILURE);
-    }
-    
-    // Обработчик сигналов
-    struct sigaction sa;
-    sa.sa_handler = signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
-    
-    // Создание серверного сокета
-    server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+int main(void) {
+    int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd == -1) {
         perror("socket");
-        exit(EXIT_FAILURE);
+        return 1;
     }
-    
-    // Установка неблокирующего режима
-    int flags = fcntl(server_fd, F_GETFL, 0);
-    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
-    
-    unlink(SOCKET_PATH);
-    
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
-    
-    if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+
+    unlink(socket_path);
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("bind");
         close(server_fd);
-        exit(EXIT_FAILURE);
+        return 1;
     }
-    
-    if (listen(server_fd, SOMAXCONN) == -1) {
+
+    if (listen(server_fd, 5) == -1) {
         perror("listen");
         close(server_fd);
-        unlink(SOCKET_PATH);
-        exit(EXIT_FAILURE);
+        return 1;
     }
-    
-    // Инициализация клиентов
+
+    fd_set read_fds, master_fds;
+    FD_ZERO(&master_fds);
+    FD_SET(server_fd, &master_fds);
+
+    client_info_t clients[MAX_CLIENTS];
+    int had_clients = 0;
+    int server_started = 0;
+    struct timespec first_event;
+    struct timespec last_event;
+
     for (int i = 0; i < MAX_CLIENTS; i++) {
         clients[i].fd = -1;
-        clients[i].client_id = -1;
-        clients[i].buf_pos = 0;
+        clients[i].active = 0;
+        clients[i].pending = 0;
+        memset(&clients[i].aio, 0, sizeof(struct aiocb));
     }
-    
-    printf("Async I/O server started with io_uring\n");
-    printf("Listening on %s\n", SOCKET_PATH);
-    printf("Press Ctrl+C to stop\n");
-    
-    // Добавляем начальный accept запрос
-    int client_id = next_client_id++;
-    add_accept_request(&ring, server_fd, &clients[client_id], client_id);
-    
-    // Главный цикл
-    while (keep_running) {
-        struct io_uring_cqe *cqe;
-        int ret;
-        
-        // Отправляем запросы в ядро
-        ret = io_uring_submit(&ring);
-        if (ret < 0) {
-            fprintf(stderr, "io_uring_submit: %s\n", strerror(-ret));
+
+    while (1) {
+        read_fds = master_fds;
+        struct timeval timeout = { .tv_sec = 0, .tv_usec = 100000 }; // 100 ms like reference
+
+        if (select(server_fd + 1, &read_fds, NULL, NULL, &timeout) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("select");
             break;
         }
-        
-        // Ждем завершения операций
-        ret = io_uring_wait_cqe(&ring, &cqe);
-        if (ret < 0) {
-            fprintf(stderr, "io_uring_wait_cqe: %s\n", strerror(-ret));
-            break;
-        }
-        
-        // Обрабатываем завершенные операции
-        struct io_uring_cqe *cqes[QUEUE_DEPTH];
-        int count = io_uring_peek_batch_cqe(&ring, cqes, QUEUE_DEPTH);
-        
-        for (int i = 0; i < count; i++) {
-            cqe = cqes[i];
-            request_data_t *data = (request_data_t *)io_uring_cqe_get_data(cqe);
-            int res = cqe->res;
-            
-            if (data) {
-                int cid = data->accept_data.client_id;
-                
-                if (data->type == 0) {  // accept
-                    if (res >= 0) {
-                        // Успешное подключение
-                        clients[cid].fd = res;
-                        
-                        // Устанавливаем неблокирующий режим для клиента
-                        flags = fcntl(res, F_GETFL, 0);
-                        fcntl(res, F_SETFL, flags | O_NONBLOCK);
-                        
-                        printf("Client %d connected\n", cid);
-                        
-                        // Добавляем запрос на чтение для этого клиента
-                        add_read_request(&ring, &clients[cid]);
-                        
-                        // Добавляем новый accept запрос для следующего клиента
-                        if (next_client_id < MAX_CLIENTS) {
-                            int new_cid = next_client_id++;
-                            add_accept_request(&ring, server_fd, &clients[new_cid], new_cid);
-                        }
-                    } else {
-                        fprintf(stderr, "Accept failed: %s\n", strerror(-res));
-                    }
-                } 
-                else if (data->type == 1) {  // read
-                    if (clients[cid].fd != -1) {
-                        if (res > 0) {
-                            // Успешно прочитали данные
-                            process_data(&clients[cid], res);
-                            
-                            // Снова добавляем запрос на чтение
-                            if (clients[cid].fd != -1) {
-                                add_read_request(&ring, &clients[cid]);
-                            }
-                        } else if (res == 0 || res == -ECONNRESET) {
-                            // Соединение закрыто
-                            printf("Client %d disconnected\n", cid);
-                            close(clients[cid].fd);
-                            clients[cid].fd = -1;
-                        } else if (res == -EAGAIN) {
-                            // Попробовать снова
-                            if (clients[cid].fd != -1) {
-                                add_read_request(&ring, &clients[cid]);
-                            }
+
+        if (FD_ISSET(server_fd, &read_fds)) {
+            struct sockaddr_un client_addr;
+            socklen_t client_len = sizeof(client_addr);
+            int new_client = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+            if (new_client == -1) {
+                perror("accept");
+            } else {
+                int placed = 0;
+                for (int i = 0; i < MAX_CLIENTS; i++) {
+                    if (clients[i].fd == -1) {
+                        clients[i].fd = new_client;
+                        clients[i].active = 1;
+                        clients[i].pending = 0;
+
+                        memset(&clients[i].aio, 0, sizeof(struct aiocb));
+                        clients[i].aio.aio_fildes = new_client;
+                        clients[i].aio.aio_buf = clients[i].buffer;
+                        clients[i].aio.aio_nbytes = BUFFER_SIZE - 1;
+                        clients[i].aio.aio_offset = 0;
+
+                        if (aio_read(&clients[i].aio) == -1) {
+                            perror("aio_read");
+                            close(new_client);
+                            clients[i].fd = -1;
+                            clients[i].active = 0;
                         } else {
-                            fprintf(stderr, "Read failed for client %d: %s\n", 
-                                    cid, strerror(-res));
+                            clients[i].pending = 1;
+                            had_clients = 1;
                         }
+                        placed = 1;
+                        break;
                     }
                 }
-                
-                free(data);
+                if (!placed) {
+                    close(new_client);
+                }
             }
-            
-            io_uring_cqe_seen(&ring, cqe);
+        }
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].fd != -1 && clients[i].pending) {
+                int error = aio_error(&clients[i].aio);
+
+                if (error == EINPROGRESS) {
+                    continue;
+                }
+
+                clients[i].pending = 0;
+
+                if (error != 0) {
+                    if (error != ECANCELED) {
+                        errno = error;
+                        perror("aio_error");
+                    }
+                    close(clients[i].fd);
+                    clients[i].fd = -1;
+                    clients[i].active = 0;
+                    continue;
+                }
+
+                ssize_t nbytes = aio_return(&clients[i].aio);
+                if (nbytes <= 0) {
+                    if (nbytes == -1) {
+                        perror("aio_return");
+                    }
+                    close(clients[i].fd);
+                    clients[i].fd = -1;
+                    clients[i].active = 0;
+                } else {
+                    struct timespec start_time, end_time;
+                    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+                    clients[i].buffer[nbytes] = '\0';
+                    for (ssize_t j = 0; j < nbytes; ++j) {
+                        unsigned char ch = (unsigned char)clients[i].buffer[j];
+                        clients[i].buffer[j] = (char)(isalpha(ch) ? toupper(ch) : ch);
+                    }
+
+                    if (nbytes > 0) {
+                        clock_gettime(CLOCK_MONOTONIC, &end_time);
+                        if (!server_started) {
+                            first_event = start_time;
+                            server_started = 1;
+                        }
+                        last_event = end_time;
+                        long processing_us =
+                            (end_time.tv_sec - start_time.tv_sec) * 1000000L +
+                            (end_time.tv_nsec - start_time.tv_nsec) / 1000L;
+                        char processing_info[64];
+                        snprintf(processing_info, sizeof(processing_info),
+                                 "[Processing time: %ld us] ", processing_us);
+
+                        struct timeval tv;
+                        struct tm *timeinfo;
+                        char timestamp[64];
+                        gettimeofday(&tv, NULL);
+                        timeinfo = localtime(&tv.tv_sec);
+                        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S", timeinfo);
+                        snprintf(timestamp + strlen(timestamp), sizeof(timestamp) - strlen(timestamp),
+                                 ".%03ld] ", (long)(tv.tv_usec / 1000));
+
+                        if (robust_write(STDOUT_FILENO, timestamp, strlen(timestamp)) < 0) {
+                            perror("write");
+                        }
+                        if (robust_write(STDOUT_FILENO, processing_info, strlen(processing_info)) < 0) {
+                            perror("write");
+                        }
+                        if (robust_write(STDOUT_FILENO, clients[i].buffer, (size_t)nbytes) < 0) {
+                            perror("write");
+                        }
+                        if (robust_write(STDOUT_FILENO, "\n", 1) < 0) {
+                            perror("write");
+                        }
+                    }
+
+                    memset(&clients[i].aio, 0, sizeof(struct aiocb));
+                    clients[i].aio.aio_fildes = clients[i].fd;
+                    clients[i].aio.aio_buf = clients[i].buffer;
+                    clients[i].aio.aio_nbytes = BUFFER_SIZE - 1;
+                    clients[i].aio.aio_offset = 0;
+
+                    if (aio_read(&clients[i].aio) == -1) {
+                        if (errno != EINPROGRESS) {
+                            perror("aio_read");
+                            close(clients[i].fd);
+                            clients[i].fd = -1;
+                            clients[i].active = 0;
+                        } else {
+                            clients[i].pending = 1;
+                        }
+                    } else {
+                        clients[i].pending = 1;
+                    }
+                }
+            }
+        }
+
+        int active_clients = 0;
+        int pending_ops = 0;
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].fd != -1) {
+                active_clients++;
+            }
+            if (clients[i].pending) {
+                pending_ops++;
+            }
+        }
+
+        if (had_clients && active_clients == 0 && pending_ops == 0) {
+            break;
         }
     }
-    
-    // Очистка
-    printf("\nCleaning up...\n");
-    
+
+    if (server_started) {
+        const char *header = "\n=== SERVER SUMMARY ===\n";
+        if (robust_write(STDOUT_FILENO, header, strlen(header)) < 0) {
+            perror("write");
+        }
+        long duration_ms =
+            (last_event.tv_sec - first_event.tv_sec) * 1000L +
+            (last_event.tv_nsec - first_event.tv_nsec) / 1000000L;
+        char duration_buf[128];
+        snprintf(duration_buf, sizeof(duration_buf),
+                 "[Server active duration: %ld ms]\n", duration_ms);
+        if (robust_write(STDOUT_FILENO, duration_buf, strlen(duration_buf)) < 0) {
+            perror("write");
+        }
+    }
+
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd != -1) {
+            aio_cancel(clients[i].fd, NULL);
             close(clients[i].fd);
         }
     }
-    
-    io_uring_queue_exit(&ring);
+
     close(server_fd);
-    unlink(SOCKET_PATH);
-    
-    return EXIT_SUCCESS;
+    unlink(socket_path);
+    return 0;
 }
