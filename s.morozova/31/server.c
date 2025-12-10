@@ -20,19 +20,20 @@ typedef struct {
     int active;
 } client_info_t;
 
-// Глобальные переменные для времени
-struct timeval program_start_time;
+// Глобальные переменные
 volatile sig_atomic_t keep_running = 1;
+double total_processing_time = 0.0;  // Суммарное время обработки всех запросов
+int total_requests_processed = 0;    // Общее количество обработанных запросов
 
 void signal_handler(int sig) {
-    struct timeval end_time;
-    gettimeofday(&end_time, NULL);
-    
-    long sec = end_time.tv_sec - program_start_time.tv_sec;
-    long usec = end_time.tv_usec - program_start_time.tv_usec;
-    double total_time = (double)sec * 1000.0 + (double)usec / 1000.0;
-    
-    printf("\nServer ran for %.3f ms\n", total_time);
+    printf("\n=== Server Statistics ===\n");
+    printf("Total requests processed: %d\n", total_requests_processed);
+    printf("Total processing time: %.3f ms\n", total_processing_time);
+    if (total_requests_processed > 0) {
+        printf("Average processing time per request: %.3f ms\n", 
+               total_processing_time / total_requests_processed);
+    }
+    printf("Shutting down...\n");
     keep_running = 0;
     exit(EXIT_SUCCESS);
 }
@@ -59,9 +60,6 @@ int main() {
     
     // Устанавливаем обработчик сигнала
     signal(SIGINT, signal_handler);
-    
-    // Запоминаем время старта программы ДО любого вывода
-    gettimeofday(&program_start_time, NULL);
     
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -95,7 +93,7 @@ int main() {
     }
     
     printf("Server started. Listening on socket %s\n", SOCKET_PATH);
-    printf("Press Ctrl+C to stop the server\n");
+    printf("Press Ctrl+C to stop the server and see statistics\n");
     
     // Главный цикл сервера
     while (keep_running) {
@@ -164,7 +162,7 @@ int main() {
         // Проверяем данные от существующих клиентов
         for (i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].fd != -1 && FD_ISSET(clients[i].fd, &read_fds)) {
-                // Засекаем время начала чтения (для времени обработки запроса)
+                // Засекаем время начала чтения
                 gettimeofday(&start_time, NULL);
                 
                 nbytes = read(clients[i].fd, clients[i].buffer, BUFFER_SIZE - 1);
@@ -175,13 +173,10 @@ int main() {
                         printf("Client %d disconnected (total clients: %d)\n", 
                                i, n_clients - 1);
                     } else {
-                        // Проверяем, была ли ошибка из-за неблокирующего режима
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Нет данных для чтения, продолжаем
                             continue;
-                        } else {
-                            perror("read");
                         }
+                        perror("read");
                     }
                     
                     close(clients[i].fd);
@@ -189,9 +184,13 @@ int main() {
                     clients[i].active = 0;
                     n_clients--;
                 } else {
-                    // Вычисляем время обработки запроса
+                    // Вычисляем время обработки этого запроса
                     gettimeofday(&end_time, NULL);
                     double processing_time = elapsed_ms(&start_time, &end_time);
+                    
+                    // Добавляем к суммарному времени обработки
+                    total_processing_time += processing_time;
+                    total_requests_processed++;
                     
                     // Обрабатываем полученные данные
                     clients[i].buffer[nbytes] = '\0';
@@ -201,7 +200,7 @@ int main() {
                         clients[i].buffer[j] = toupper(clients[i].buffer[j]);
                     }
                     
-                    // Создаем форматированный вывод с информацией о времени обработки
+                    // Создаем форматированный вывод
                     char output_buffer[BUFFER_SIZE + 128];
                     int output_len = snprintf(output_buffer, sizeof(output_buffer),
                                             "[Client %d, processing time: %.3f ms] ", 
@@ -218,12 +217,16 @@ int main() {
                     
                     // Выводим результат
                     write(STDOUT_FILENO, output_buffer, output_len);
+                    
+                    // Также можно отправлять ответ клиенту (если нужно)
+                    // write(clients[i].fd, clients[i].buffer, nbytes);
                 }
             }
         }
     }
     
-    printf("\nShutting down server...\n");
+    printf("\nFinal statistics:\n");
+    printf("Total processing time: %.3f ms\n", total_processing_time);
     
     // Закрываем все соединения
     for (i = 0; i < MAX_CLIENTS; i++) {
