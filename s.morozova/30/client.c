@@ -1,54 +1,41 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <string.h>
 
-#define SOCKET_PATH "/tmp/case_converter_socket"
+#define SOCKET_PATH "/tmp/simple_socket"
 #define BUFFER_SIZE 1024
 
-int main() {
-    int client_fd;
+int main(int argc, char *argv[]) {
+    int sockfd;
     struct sockaddr_un server_addr;
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes_read;
     
-    // Создаем сокет
-    client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (client_fd == -1) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <text>\n", argv[0]);ы
+        exit(EXIT_FAILURE);
+    }
+    
+    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd == -1) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
     
-    // Устанавливаем адрес сервера
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    // Подключаемся к серверу
-    if (connect(client_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
-        close(client_fd);
+        close(sockfd);
         exit(EXIT_FAILURE);
     }
     
-    printf("Connected to server. Enter text (Ctrl+D to finish):\n");
+    // Отправляем текст из аргументов командной строки
+    write(sockfd, argv[1], strlen(argv[1]));
     
-    // Читаем текст из стандартного ввода и отправляем серверу
-    while ((bytes_read = read(STDIN_FILENO, buffer, BUFFER_SIZE)) > 0) {
-        if (write(client_fd, buffer, bytes_read) == -1) {
-            perror("write");
-            break;
-        }
-    }
-    
-    if (bytes_read == -1) {
-        perror("read");
-    }
-    
-    printf("Disconnecting from server\n");
-    close(client_fd);
-    
-    return 0;
+    close(sockfd);
+    return EXIT_SUCCESS;
 }
