@@ -40,9 +40,8 @@ int main(int argc, char *argv[]) {
     // Отправляем N сообщений
     for (int i = 0; i < count; i++) {
         char message[256];
-        snprintf(message, sizeof(message), "%s%d\n", argv[1], i+1);
+        snprintf(message, sizeof(message), "%s\n", argv[1]);
         write(sockfd, message, strlen(message));
-        usleep(10000);  // 10ms задержка между сообщениями
     }
     
     close(sockfd);
