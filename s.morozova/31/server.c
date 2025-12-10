@@ -8,7 +8,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/time.h>
-#include <errno.h>  // Добавляем для EINTR и других errno кодов
+#include <errno.h>
 
 #define SOCKET_PATH "/tmp/task31_socket"
 #define BUFFER_SIZE 1024
@@ -20,10 +20,20 @@ typedef struct {
     int active;
 } client_info_t;
 
-double elapsed_ms_val = 0;
+// Глобальные переменные для времени
+struct timeval program_start_time;
+volatile sig_atomic_t keep_running = 1;
 
 void signal_handler(int sig) {
-    printf("\nElapsed time: %.3f ms\n", elapsed_ms_val);
+    struct timeval end_time;
+    gettimeofday(&end_time, NULL);
+    
+    long sec = end_time.tv_sec - program_start_time.tv_sec;
+    long usec = end_time.tv_usec - program_start_time.tv_usec;
+    double total_time = (double)sec * 1000.0 + (double)usec / 1000.0;
+    
+    printf("\nServer ran for %.3f ms\n", total_time);
+    keep_running = 0;
     exit(EXIT_SUCCESS);
 }
 
@@ -45,12 +55,12 @@ int main() {
     fd_set read_fds;
     
     struct timeval start_time, end_time;
-    struct timeval program_start_time;
-    struct timeval select_timeout;  // Таймаут для select
+    struct timeval select_timeout;
     
+    // Устанавливаем обработчик сигнала
     signal(SIGINT, signal_handler);
     
-    // Запоминаем время старта программы
+    // Запоминаем время старта программы ДО любого вывода
     gettimeofday(&program_start_time, NULL);
     
     server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -87,7 +97,8 @@ int main() {
     printf("Server started. Listening on socket %s\n", SOCKET_PATH);
     printf("Press Ctrl+C to stop the server\n");
     
-    while (1) {
+    // Главный цикл сервера
+    while (keep_running) {
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
         max_fd = server_fd;
@@ -112,9 +123,8 @@ int main() {
         if (select_result == -1) {
             // Проверяем, был ли select прерван сигналом
             if (errno == EINTR) {
-                // Сигнал прервал select, выходим
-                printf("\nSelect interrupted by signal\n");
-                break;
+                // Сигнал прервал select, продолжаем (сигнал обработается в handler)
+                continue;
             }
             perror("select");
             break;
@@ -122,7 +132,6 @@ int main() {
         
         if (select_result == 0) {
             // Таймаут, ничего не произошло
-            // Можно использовать для периодических задач
             continue;
         }
         
@@ -155,7 +164,7 @@ int main() {
         // Проверяем данные от существующих клиентов
         for (i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].fd != -1 && FD_ISSET(clients[i].fd, &read_fds)) {
-                // Засекаем время начала чтения
+                // Засекаем время начала чтения (для времени обработки запроса)
                 gettimeofday(&start_time, NULL);
                 
                 nbytes = read(clients[i].fd, clients[i].buffer, BUFFER_SIZE - 1);
@@ -180,10 +189,9 @@ int main() {
                     clients[i].active = 0;
                     n_clients--;
                 } else {
-                    // Вычисляем время чтения и обработки
+                    // Вычисляем время обработки запроса
                     gettimeofday(&end_time, NULL);
                     double processing_time = elapsed_ms(&start_time, &end_time);
-                    elapsed_ms_val = processing_time;
                     
                     // Обрабатываем полученные данные
                     clients[i].buffer[nbytes] = '\0';
@@ -193,10 +201,10 @@ int main() {
                         clients[i].buffer[j] = toupper(clients[i].buffer[j]);
                     }
                     
-                    // Создаем форматированный вывод с информацией о времени
+                    // Создаем форматированный вывод с информацией о времени обработки
                     char output_buffer[BUFFER_SIZE + 128];
                     int output_len = snprintf(output_buffer, sizeof(output_buffer),
-                                            "[Client %d, %.3f ms] ", 
+                                            "[Client %d, processing time: %.3f ms] ", 
                                             i, processing_time);
                     
                     // Копируем преобразованные данные
@@ -227,11 +235,6 @@ int main() {
     
     close(server_fd);
     unlink(SOCKET_PATH);
-    
-    // Вычисляем общее время работы сервера
-    gettimeofday(&end_time, NULL);
-    double total_time = elapsed_ms(&program_start_time, &end_time);
-    printf("Server ran for %.3f ms\n", total_time);
     
     return EXIT_SUCCESS;
 }
