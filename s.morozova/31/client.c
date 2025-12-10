@@ -6,35 +6,23 @@
 #include <string.h>
 
 #define SOCKET_PATH "/tmp/task31_socket"
-#define BUFFER_SIZE 1024
-
-static void send_with_retry(int fd, const char *message) {
-    size_t to_write = strlen(message);
-    size_t written_total = 0;
-
-    while (written_total < to_write) {
-        ssize_t written = write(fd, message + written_total, to_write - written_total);
-        if (written == -1) {
-            perror("write");
-            close(fd);
-            exit(EXIT_FAILURE);
-        }
-        written_total += (size_t)written;
-    }
-}
 
 int main(int argc, char *argv[]) {
-    int client_fd;
+    int sockfd;
     struct sockaddr_un server_addr;
-    char message[BUFFER_SIZE] = "message\n";
     
-    // Если указан аргумент, используем его как сообщение
-    if (argc > 1) {
-        snprintf(message, sizeof(message), "%s\n", argv[1]);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <text> [count]\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
     
-    client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (client_fd == -1) {
+    int count = 50;  // По умолчанию 50 сообщений
+    if (argc > 2) {
+        count = atoi(argv[2]);
+    }
+    
+    sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd == -1) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
@@ -43,16 +31,20 @@ int main(int argc, char *argv[]) {
     server_addr.sun_family = AF_UNIX;
     strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
     
-    if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
         perror("connect");
-        close(client_fd);
+        close(sockfd);
         exit(EXIT_FAILURE);
     }
-
-    // Отправляем одно сообщение
-    send_with_retry(client_fd, message);
     
-    close(client_fd);
+    // Отправляем N сообщений
+    for (int i = 0; i < count; i++) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s%d\n", argv[1], i+1);
+        write(sockfd, message, strlen(message));
+        usleep(10000);  // 10ms задержка между сообщениями
+    }
     
+    close(sockfd);
     return EXIT_SUCCESS;
 }
