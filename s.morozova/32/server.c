@@ -86,7 +86,7 @@ int main(void) {
 
     while (1) {
         read_fds = master_fds;
-        struct timeval timeout = { .tv_sec = 0, .tv_usec = 100000 }; // 100 ms like reference
+        struct timeval timeout = { .tv_sec = 0, .tv_usec = 100000 }; 
 
         if (select(server_fd + 1, &read_fds, NULL, NULL, &timeout) == -1) {
             if (errno == EINTR) {
@@ -250,7 +250,7 @@ int main(void) {
     }
 
     if (server_started) {
-        const char *header = "\n=== SERVER SUMMARY ===\n";
+        const char *header = "\n";
         if (robust_write(STDOUT_FILENO, header, strlen(header)) < 0) {
             perror("write");
         }

@@ -30,7 +30,7 @@ int main(int argc, char *argv[]) {
     // Get client number from command line argument, default to "1"
     const char *client_num = (argc > 1) ? argv[1] : "1";
     char message[32];
-    snprintf(message, sizeof(message), "Client%s\n", client_num);
+    snprintf(message, sizeof(message), "%s\n", client_num);
     size_t message_len = strlen(message);
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
