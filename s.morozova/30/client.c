@@ -13,7 +13,7 @@ int main(int argc, char *argv[]) {
     struct sockaddr_un server_addr;
     
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <text>\n", argv[0]);ы
+        fprintf(stderr, "Usage: %s <text>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     
