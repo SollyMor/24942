@@ -312,7 +312,6 @@ int main() {
     printf("\n=== Final Statistics ===\n");
     printf("Total requests processed: %d\n", total_requests_processed);
     printf("Total processing time: %.3f ms\n", total_processing_time);
-    }
     
     // Закрываем все соединения
     for (i = 0; i < MAX_CLIENTS; i++) {
