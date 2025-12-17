@@ -1,3 +1,6 @@
+Как работает компьютер: глубокое погружение (на примере Linux)
+https://habr.com/ru/articles/755638/
+
 Создание deb пакетов
 https://habr.com/ru/articles/130868/
 
@@ -8,4 +11,5 @@ https://www.youtube.com/watch?v=2yyYfe_b5sU
 https://www.youtube.com/watch?v=lINlezXtaNc
 
 ВСЁ О РУССКИХ ЛИНУКСАХ (2023)
+
 https://www.youtube.com/watch?v=ZMHUBc_4Zbw

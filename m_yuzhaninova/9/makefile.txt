@@ -1,0 +1,3 @@
+all:
+	gcc 91.c -o 91
+	gcc 92.c -o 92

@@ -1,0 +1,3 @@
+all:
+	gcc c.c -o client -lsocket
+	gcc s.c -o server -lsocket

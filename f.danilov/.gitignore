@@ -1,0 +1,15 @@
+#ignore all files
+*
+
+#unignore directoires
+!*/
+.vscode
+build
+
+#unignore specified files
+!*.c
+!*.h
+!*.txt
+!*.csv
+!.gitignore
+!Makefile
